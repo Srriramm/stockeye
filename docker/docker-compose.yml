@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  # ─── Backend Service ──────────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: stock-assistant-backend
+    ports:
+      - "5000:5000"
+    env_file:
+      - ../.env
+    volumes:
+      - ../database:/app/database
+      - ../backend:/app:ro  # Read-only mount for development
+    restart: unless-stopped
+    networks:
+      - stock-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ─── Frontend Service ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: stock-assistant-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - stock-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # ─── MCP Server Service ───────────────────────────────────────
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mcp
+    container_name: stock-assistant-mcp
+    env_file:
+      - ../.env
+    volumes:
+      - ../database:/app/database
+    restart: unless-stopped
+    networks:
+      - stock-network
+    stdin_open: true
+    tty: true
+    # Note: MCP server runs in STDIO mode for Claude Desktop
+    # It won't expose ports but will be available via stdio
+
+# ─── Networks ─────────────────────────────────────────────────
+networks:
+  stock-network:
+    driver: bridge
+
+# ─── Volumes ──────────────────────────────────────────────────
+volumes:
+  database:
+    driver: local
