@@ -8,28 +8,31 @@ import sys
 import json
 import logging
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 
-# Windows console (cp1252) can't print ₹ or emoji — reconfigure to UTF-8
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-if sys.platform == 'win32' and hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+import io
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
-# Configure logging
+# Configure logging — on Windows, wrap the raw stderr buffer with UTF-8 so
+# the ₹ symbol and emoji in log messages don't crash with cp1252 errors.
+# (sys.stderr.reconfigure alone doesn't survive eventlet's stream patching.)
 os.makedirs('logs', exist_ok=True)
+if sys.platform == 'win32' and hasattr(sys.stderr, 'buffer'):
+    _console_stream = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+else:
+    _console_stream = sys.stderr
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/backend.log'),
-        logging.StreamHandler()
+        logging.FileHandler('logs/backend.log', encoding='utf-8'),
+        logging.StreamHandler(_console_stream)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -43,6 +46,12 @@ from portfolio_manager import (
     add_price_alert, get_active_price_alerts,
     get_portfolio_history, save_chat_message, get_chat_history, clear_chat_history
 )
+from auth_manager import require_auth, optional_auth, verify_token
+from conversation_manager import (
+    create_conversation, get_conversations, get_conversation,
+    rename_conversation, delete_conversation, add_message,
+    get_messages, get_or_create_conversation
+)
 from stock_data import (
     get_stock_price, get_stock_info, get_historical_data,
     calculate_technical_indicators, get_market_indices, get_top_gainers_losers,
@@ -51,7 +60,7 @@ from stock_data import (
     POPULAR_INDIAN_STOCKS
 )
 from news_monitor import fetch_stock_news, fetch_market_news, get_news_summary, get_reddit_sentiment
-from ai_advisor import get_stock_advice, get_stock_advice_dual, analyze_stock, get_portfolio_review, compare_stocks, clear_conversation
+from ai_advisor import get_stock_advice, get_stock_advice_dual, analyze_stock, get_portfolio_review, compare_stocks
 from ai_advisor_enhanced import get_budget_based_recommendation, extract_budget_from_message
 from market_monitor import monitor_service, set_socketio as set_monitor_socketio
 from realtime_service import realtime_service, set_socketio as set_realtime_socketio
@@ -75,6 +84,9 @@ from advanced_alerts import (
 )
 from forecasting_engine import forecast_stock_price, get_risk_profile
 from brain_engine import run_brain_analysis
+from middleware import init_middleware
+from rate_limiter import init_limiter, limiter, LIMIT_CHAT, LIMIT_FORECAST, LIMIT_TRADING, LIMIT_PORTFOLIO
+from audit import log_event
 
 # ─── App Configuration ─────────────────────────────────────────
 
@@ -99,7 +111,22 @@ CORS(app, resources={r"/api/*": {
     "supports_credentials": True
 }})
 
-socketio = SocketIO(app, cors_allowed_origins=allowed_origins, async_mode='eventlet')
+_REDIS_URL = os.getenv('REDIS_URL')
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=allowed_origins,
+    async_mode='eventlet',
+    # When REDIS_URL is set, SocketIO uses Redis pub/sub so that WebSocket
+    # events emitted by Celery workers or other Flask instances are
+    # broadcast to all connected clients across every server process.
+    message_queue=_REDIS_URL,
+)
+
+# Attach request-ID injection and structured logging middleware
+init_middleware(app)
+
+# Attach rate limiter (backed by Redis when REDIS_URL is set)
+init_limiter(app)
 
 # Connect monitoring service to socketio
 set_monitor_socketio(socketio)
@@ -107,11 +134,10 @@ set_monitor_socketio(socketio)
 # Connect realtime price service to socketio
 set_realtime_socketio(socketio)
 
-# Initialize database
+# Initialize database (no-op for Supabase; tables created by setup_db.py)
 init_database()
 
-# Auto-sync all existing portfolio holdings to monitoring on startup
-sync_portfolio_to_monitors()
+# Note: sync_portfolio_to_monitors is now per-user; skipping global sync
 
 
 # ─── Input Validation Functions ────────────────────────────────
@@ -166,14 +192,99 @@ def server_error(e):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
+    from db import DB_TYPE, get_db_connection
+
+    # Check database
+    db_ok = False
+    try:
+        with get_db_connection() as conn:
+            conn.execute('SELECT 1').fetchone()
+        db_ok = True
+    except Exception as e:
+        logger.warning(f"Health check DB error: {e}")
+
+    # Check Redis
+    redis_ok = False
+    try:
+        import redis as _redis
+        r = _redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'),
+                            socket_connect_timeout=1, socket_timeout=1)
+        r.ping()
+        redis_ok = True
+    except Exception:
+        pass  # Redis unavailable is non-fatal (graceful degradation)
+
+    status = 'ok' if db_ok else 'degraded'
+    http_code = 200 if db_ok else 503
+
     return jsonify({
-        'status': 'ok',
+        'status': status,
         'timestamp': datetime.now().isoformat(),
+        'db_type': DB_TYPE,
         'services': {
-            'database': 'connected',
+            'database': 'connected' if db_ok else 'error',
+            'redis': 'connected' if redis_ok else 'unavailable',
             'monitoring': 'running' if monitor_service.is_running else 'stopped',
         }
-    })
+    }), http_code
+
+
+@app.route('/api/health/ready', methods=['GET'])
+def readiness_check():
+    """Lightweight readiness probe — confirms the app process is alive."""
+    return jsonify({'ready': True}), 200
+
+
+# ═══════════════════════════════════════════════════════════════
+# AUTH ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/auth/me', methods=['GET'])
+@require_auth
+def get_me(user_id):
+    """Return current user info from JWT."""
+    return jsonify({'user_id': user_id})
+
+
+# ─── Conversations ───────────────────────────────────────────────
+
+@app.route('/api/conversations', methods=['GET'])
+@require_auth
+def list_conversations(user_id):
+    return jsonify(get_conversations(user_id))
+
+
+@app.route('/api/conversations', methods=['POST'])
+@require_auth
+def new_conversation(user_id):
+    data  = request.json or {}
+    title = data.get('title', 'New Chat')
+    cid   = create_conversation(user_id, title)
+    return jsonify({'id': cid, 'title': title}), 201
+
+
+@app.route('/api/conversations/<int:cid>', methods=['GET'])
+@require_auth
+def get_conv(user_id, cid):
+    conv = get_conversation(user_id, cid)
+    if not conv:
+        return jsonify({'error': 'Not found'}), 404
+    return jsonify(conv)
+
+
+@app.route('/api/conversations/<int:cid>', methods=['PATCH'])
+@require_auth
+def rename_conv(user_id, cid):
+    title = (request.json or {}).get('title', '')
+    rename_conversation(user_id, cid, title)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/conversations/<int:cid>', methods=['DELETE'])
+@require_auth
+def delete_conv(user_id, cid):
+    delete_conversation(user_id, cid)
+    return jsonify({'ok': True})
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -181,15 +292,24 @@ def health_check():
 # ═══════════════════════════════════════════════════════════════
 
 @app.route('/api/chat', methods=['POST'])
-def chat():
-    """Handle chatbot queries with dual AI provider support."""
+@require_auth
+@limiter.limit(LIMIT_CHAT)
+def chat(user_id):
+    """Handle chatbot queries. Requires authentication for per-user conversation isolation."""
     data = request.json
     if not data or 'message' not in data:
         return jsonify({'error': 'Message is required'}), 400
 
     user_message = data['message']
-    provider = data.get('provider', 'auto')  # NEW: provider selection ('auto', 'openai', 'anthropic')
-    save_chat_message('user', user_message)
+    provider = data.get('provider', 'auto')
+    conversation_id = data.get('conversation_id')
+
+    # Always use conversation_manager for per-user isolated history
+    cid = get_or_create_conversation(user_id, conversation_id)
+    add_message(user_id, cid, 'user', user_message)
+
+    # Load per-user conversation history to pass to AI (never use a global list)
+    prior_messages = get_messages(user_id, cid, limit=20)
 
     # Check if this is a budget-based investment query
     budget = extract_budget_from_message(user_message)
@@ -200,7 +320,7 @@ def chat():
         # Use enhanced AI advisor with real stock data
         logger.info(f"Budget-based query detected: ₹{budget}")
         result = get_budget_based_recommendation(budget, user_message, provider)
-        save_chat_message('assistant', result['response'])
+        add_message(user_id, cid, 'assistant', result['response'])
 
         return jsonify({
             'response': result['response'],
@@ -237,10 +357,10 @@ def chat():
     # If asking about portfolio
     if any(word in message_lower for word in ['portfolio', 'holdings', 'my stocks', 'review']):
         try:
-            holdings = get_all_holdings()
+            holdings = get_all_holdings(user_id)
             if holdings:
                 prices = get_bulk_prices([h['ticker'] for h in holdings])
-                portfolio_data = calculate_portfolio_value(prices)
+                portfolio_data = calculate_portfolio_value(user_id, prices)
         except Exception as e:
             logger.error(f"Failed to fetch portfolio data: {e}")
             portfolio_data = None
@@ -272,43 +392,46 @@ def chat():
             if comparison:
                 stock_data = comparison
 
-    # Get AI response with dual provider support
+    # Get AI response — pass per-user conversation history, never a global list
     result = get_stock_advice_dual(
         user_message,
-        provider=provider,  # NEW
+        provider=provider,
+        conversation_history=prior_messages,
         stock_data=stock_data,
         news_data=news_data,
         portfolio_data=portfolio_data,
         technicals=technicals
     )
 
-    save_chat_message('assistant', result['response'])
+    add_message(user_id, cid, 'assistant', result['response'])
 
     return jsonify({
         'response': result['response'],
-        'provider_used': result.get('provider_used', 'none'),      # NEW
-        'model_used': result.get('model_used', 'unknown'),         # NEW
-        'query_type': result.get('query_type', 'unknown'),         # NEW
+        'provider_used': result.get('provider_used', 'none'),
+        'model_used': result.get('model_used', 'unknown'),
+        'query_type': result.get('query_type', 'unknown'),
         'data_used': result.get('data_used', ''),
         'error': result.get('error'),
         'timestamp': datetime.now().isoformat(),
         'mentioned_stocks': mentioned_tickers,
+        'conversation_id': cid,
     })
 
 
 @app.route('/api/chat/history', methods=['GET'])
-def chat_history():
+@require_auth
+def chat_history(user_id):
     """Get chat history."""
     limit = request.args.get('limit', 50, type=int)
-    history = get_chat_history(limit)
+    history = get_chat_history(user_id, limit)
     return jsonify({'messages': history})
 
 
 @app.route('/api/chat/clear', methods=['POST'])
-def clear_chat():
-    """Clear chat history."""
-    clear_chat_history()
-    clear_conversation()
+@require_auth
+def clear_chat(user_id):
+    """Clear chat history for the authenticated user."""
+    clear_chat_history(user_id)
     return jsonify({'status': 'cleared'})
 
 
@@ -440,6 +563,7 @@ def get_support_resistance_endpoint(ticker):
 
 
 @app.route('/api/stocks/<ticker>/forecast', methods=['GET'])
+@limiter.limit(LIMIT_FORECAST)
 def stock_forecast(ticker):
     """Get AI Brain-powered analysis: technicals + ML forecast + news + backtest + narrative."""
     days = request.args.get('days', 30, type=int)
@@ -476,9 +600,10 @@ def stock_risk_profile(ticker):
 # ═══════════════════════════════════════════════════════════════
 
 @app.route('/api/portfolio', methods=['GET'])
-def get_portfolio():
+@require_auth
+def get_portfolio(user_id):
     """Get portfolio with live prices and P&L."""
-    holdings = get_all_holdings()
+    holdings = get_all_holdings(user_id)
     if not holdings:
         return jsonify({
             'holdings': [],
@@ -491,25 +616,27 @@ def get_portfolio():
 
     tickers = [h['ticker'] for h in holdings]
     prices = get_bulk_prices(tickers)
-    portfolio = calculate_portfolio_value(prices)
+    portfolio = calculate_portfolio_value(user_id, prices)
 
     return jsonify(portfolio)
 
 
 @app.route('/api/portfolio/stats', methods=['GET'])
-def portfolio_stats():
+@require_auth
+def portfolio_stats(user_id):
     """Get comprehensive portfolio statistics."""
-    holdings = get_all_holdings()
+    holdings = get_all_holdings(user_id)
     if not holdings:
         return jsonify({'error': 'No holdings in portfolio'}), 404
 
     prices = get_bulk_prices([h['ticker'] for h in holdings])
-    stats = get_portfolio_stats(prices)
+    stats = get_portfolio_stats(user_id, prices)
     return jsonify(stats)
 
 
 @app.route('/api/portfolio/add', methods=['POST'])
-def add_stock():
+@require_auth
+def add_stock(user_id):
     """Add a stock to the portfolio."""
     try:
         data = request.json
@@ -536,6 +663,7 @@ def add_stock():
                 name = ticker
 
         holding_id = add_holding(
+            user_id,
             ticker=ticker,
             name=name,
             quantity=quantity,
@@ -545,8 +673,11 @@ def add_stock():
             exchange=data.get('exchange', 'NSE'),
         )
 
+        log_event(user_id, 'portfolio.add', 'holding', holding_id,
+                  {'ticker': ticker, 'quantity': quantity, 'buy_price': buy_price})
+
         # Automatically start monitoring portfolio stocks
-        start_monitoring(ticker, name)
+        start_monitoring(user_id, ticker, name)
 
         return jsonify({'id': holding_id, 'message': f'{ticker} added to portfolio'}), 201
     except ValueError as e:
@@ -554,58 +685,65 @@ def add_stock():
 
 
 @app.route('/api/portfolio/<int:holding_id>', methods=['PUT'])
-def update_stock(holding_id):
+@require_auth
+def update_stock(user_id, holding_id):
     """Update a portfolio holding."""
     data = request.json
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
-    success = update_holding(holding_id, data)
+    success = update_holding(user_id, holding_id, data)
     if success:
+        log_event(user_id, 'portfolio.update', 'holding', holding_id)
         return jsonify({'message': 'Holding updated successfully'})
     return jsonify({'error': 'Holding not found'}), 404
 
 
 @app.route('/api/portfolio/<int:holding_id>', methods=['DELETE'])
-def remove_stock(holding_id):
+@require_auth
+def remove_stock(user_id, holding_id):
     """Remove a stock from the portfolio."""
-    holding = get_holding_by_id(holding_id)
+    holding = get_holding_by_id(user_id, holding_id)
     if not holding:
         return jsonify({'error': 'Holding not found'}), 404
 
-    delete_holding(holding_id)
+    delete_holding(user_id, holding_id)
+    log_event(user_id, 'portfolio.delete', 'holding', holding_id,
+              {'ticker': holding.get('ticker')})
 
     # Stop monitoring if not in any watchlist either
     try:
         from watchlist_manager import get_stock_in_watchlists
-        in_watchlists = get_stock_in_watchlists(holding['ticker'])
+        in_watchlists = get_stock_in_watchlists(user_id, holding['ticker'])
         if not in_watchlists:
-            stop_monitoring(holding['ticker'])
+            stop_monitoring(user_id, holding['ticker'])
     except Exception:
-        stop_monitoring(holding['ticker'])
+        stop_monitoring(user_id, holding['ticker'])
 
     return jsonify({'message': f'{holding["ticker"]} removed from portfolio'})
 
 
 @app.route('/api/portfolio/review', methods=['GET'])
-def portfolio_review():
+@require_auth
+def portfolio_review(user_id):
     """Get AI-powered portfolio review."""
-    holdings = get_all_holdings()
+    holdings = get_all_holdings(user_id)
     if not holdings:
         return jsonify({'error': 'No holdings in portfolio'}), 404
 
     prices = get_bulk_prices([h['ticker'] for h in holdings])
-    portfolio_data = calculate_portfolio_value(prices)
+    portfolio_data = calculate_portfolio_value(user_id, prices)
     review = get_portfolio_review(portfolio_data)
 
     return jsonify(review)
 
 
 @app.route('/api/portfolio/history', methods=['GET'])
-def portfolio_history():
+@require_auth
+def portfolio_history(user_id):
     """Get portfolio value history."""
     days = request.args.get('days', 30, type=int)
-    history = get_portfolio_history(days)
+    history = get_portfolio_history(user_id, days)
     return jsonify({'history': history})
 
 
@@ -614,7 +752,8 @@ def portfolio_history():
 # ═══════════════════════════════════════════════════════════════
 
 @app.route('/api/monitor/start', methods=['POST'])
-def start_stock_monitor():
+@require_auth
+def start_stock_monitor(user_id):
     """Start monitoring a stock."""
     try:
         data = request.json
@@ -632,6 +771,7 @@ def start_stock_monitor():
         return jsonify({'error': f'Could not fetch data for {ticker}'}), 404
 
     start_monitoring(
+        user_id,
         ticker,
         name=price_data.get('name', ticker),
         price_baseline=price_data['current_price'],
@@ -649,20 +789,22 @@ def start_stock_monitor():
 
 
 @app.route('/api/monitor/stop', methods=['POST'])
-def stop_stock_monitor():
+@require_auth
+def stop_stock_monitor(user_id):
     """Stop monitoring a stock."""
     data = request.json
     if not data or 'ticker' not in data:
         return jsonify({'error': 'Ticker is required'}), 400
 
-    stop_monitoring(data['ticker'].upper())
+    stop_monitoring(user_id, data['ticker'].upper())
     return jsonify({'message': f'Stopped monitoring {data["ticker"].upper()}'})
 
 
 @app.route('/api/monitor/stocks', methods=['GET'])
-def monitored_stocks_list():
+@require_auth
+def monitored_stocks_list(user_id):
     """Get all monitored stocks with current status."""
-    stocks = get_monitored_stocks(active_only=True)
+    stocks = get_monitored_stocks(user_id, active_only=True)
     enriched = []
 
     for stock in stocks:
@@ -698,31 +840,35 @@ def control_monitor_service():
 # ═══════════════════════════════════════════════════════════════
 
 @app.route('/api/alerts', methods=['GET'])
-def alerts():
+@require_auth
+def alerts(user_id):
     """Get recent alerts."""
     hours = request.args.get('hours', 24, type=int)
     limit = request.args.get('limit', 50, type=int)
-    alerts_list = get_recent_alerts(hours=hours, limit=limit)
+    alerts_list = get_recent_alerts(user_id, hours=hours, limit=limit)
     return jsonify({'alerts': alerts_list})
 
 
 @app.route('/api/alerts/<ticker>', methods=['GET'])
-def alerts_for_stock(ticker):
+@require_auth
+def alerts_for_stock(user_id, ticker):
     """Get alerts for a specific stock."""
     limit = request.args.get('limit', 20, type=int)
-    alerts_list = get_alerts_for_ticker(ticker.upper(), limit=limit)
+    alerts_list = get_alerts_for_ticker(user_id, ticker.upper(), limit=limit)
     return jsonify({'alerts': alerts_list})
 
 
 @app.route('/api/alerts/<int:alert_id>/read', methods=['POST'])
-def read_alert(alert_id):
+@require_auth
+def read_alert(user_id, alert_id):
     """Mark an alert as read."""
-    mark_alert_read(alert_id)
+    mark_alert_read(user_id, alert_id)
     return jsonify({'status': 'marked as read'})
 
 
 @app.route('/api/alerts/price', methods=['POST'])
-def set_price_alert():
+@require_auth
+def set_price_alert(user_id):
     """Set a custom price alert."""
     try:
         data = request.json
@@ -734,6 +880,7 @@ def set_price_alert():
         target_price = validate_price(data['target_price'], 'target_price')
 
         alert_id = create_price_alert(
+            user_id,
             ticker,
             target_price,
             data.get('direction', 'above'),
@@ -745,7 +892,8 @@ def set_price_alert():
 
 
 @app.route('/api/alerts/advanced', methods=['POST'])
-def create_advanced_alert():
+@require_auth
+def create_advanced_alert(user_id):
     """Create advanced alert (RSI, volume, MA cross, etc.)."""
     try:
         data = request.json
@@ -757,33 +905,41 @@ def create_advanced_alert():
 
         if alert_type == 'PERCENT_CHANGE':
             alert_id = create_percent_change_alert(
+                user_id,
                 ticker,
                 data.get('percent_change', 5),
                 data.get('timeframe', '1d')
             )
         elif alert_type == 'VOLUME_SURGE':
             alert_id = create_volume_surge_alert(
+                user_id,
                 ticker,
                 data.get('volume_multiplier', 2.0)
             )
         elif alert_type == 'RSI_LEVEL':
             alert_id = create_rsi_alert(
+                user_id,
                 ticker,
                 data.get('rsi_level', 30),
                 data.get('condition', 'below')
             )
         elif alert_type == 'MA_CROSS':
             alert_id = create_moving_average_cross_alert(
+                user_id,
                 ticker,
                 data.get('ma_type', 'sma_20')
             )
         elif alert_type == 'WEEK_52':
             alert_id = create_week_52_alert(
+                user_id,
                 ticker,
                 data.get('level', 'high')
             )
         else:
             return jsonify({'error': 'Invalid alert type'}), 400
+
+        log_event(user_id, 'alert.create', 'advanced_alert', alert_id,
+                  {'ticker': ticker, 'alert_type': alert_type})
 
         return jsonify({'id': alert_id, 'message': f'{alert_type} alert created'}), 201
 
@@ -792,29 +948,33 @@ def create_advanced_alert():
 
 
 @app.route('/api/alerts/advanced', methods=['GET'])
-def get_advanced_alerts():
+@require_auth
+def get_advanced_alerts(user_id):
     """Get all active advanced alerts."""
     ticker = request.args.get('ticker')
-    alerts = get_active_alerts(ticker=ticker)
+    alerts = get_active_alerts(user_id, ticker=ticker)
 
     return jsonify({'alerts': alerts, 'count': len(alerts)})
 
 
 @app.route('/api/alerts/advanced/<int:alert_id>', methods=['DELETE'])
-def delete_advanced_alert_endpoint(alert_id):
+@require_auth
+def delete_advanced_alert_endpoint(user_id, alert_id):
     """Delete an advanced alert."""
-    success = delete_advanced_alert(alert_id)
+    success = delete_advanced_alert(user_id, alert_id)
 
     if success:
+        log_event(user_id, 'alert.delete', 'advanced_alert', alert_id)
         return jsonify({'message': 'Alert deleted'})
 
     return jsonify({'error': 'Alert not found'}), 404
 
 
 @app.route('/api/alerts/advanced/<int:alert_id>/reset', methods=['POST'])
-def reset_advanced_alert(alert_id):
+@require_auth
+def reset_advanced_alert(user_id, alert_id):
     """Reset a triggered alert."""
-    success = reset_alert(alert_id)
+    success = reset_alert(user_id, alert_id)
 
     if success:
         return jsonify({'message': 'Alert reset'})
@@ -845,14 +1005,16 @@ def market_movers():
 # ═══════════════════════════════════════════════════════════════
 
 @app.route('/api/watchlists', methods=['GET'])
-def get_watchlists():
+@require_auth
+def get_watchlists(user_id):
     """Get all watchlists."""
-    watchlists = get_all_watchlists()
+    watchlists = get_all_watchlists(user_id)
     return jsonify({'watchlists': watchlists})
 
 
 @app.route('/api/watchlists', methods=['POST'])
-def create_new_watchlist():
+@require_auth
+def create_new_watchlist(user_id):
     """Create a new watchlist."""
     data = request.json
     if not data or 'name' not in data:
@@ -862,14 +1024,16 @@ def create_new_watchlist():
     description = data.get('description', '')
     color = data.get('color', '#3b82f6')
 
-    watchlist_id = create_watchlist(name, description, color)
+    watchlist_id = create_watchlist(user_id, name, description, color)
+    log_event(user_id, 'watchlist.create', 'watchlist', watchlist_id, {'name': name})
     return jsonify({'id': watchlist_id, 'message': 'Watchlist created'}), 201
 
 
 @app.route('/api/watchlists/<int:watchlist_id>', methods=['GET'])
-def get_watchlist(watchlist_id):
+@require_auth
+def get_watchlist(user_id, watchlist_id):
     """Get a specific watchlist with all items."""
-    watchlist = get_watchlist_by_id(watchlist_id)
+    watchlist = get_watchlist_by_id(user_id, watchlist_id)
     if not watchlist:
         return jsonify({'error': 'Watchlist not found'}), 404
 
@@ -883,13 +1047,15 @@ def get_watchlist(watchlist_id):
 
 
 @app.route('/api/watchlists/<int:watchlist_id>', methods=['PUT'])
-def update_watchlist_endpoint(watchlist_id):
+@require_auth
+def update_watchlist_endpoint(user_id, watchlist_id):
     """Update watchlist properties."""
     data = request.json
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
     success = update_watchlist(
+        user_id,
         watchlist_id,
         name=data.get('name'),
         description=data.get('description'),
@@ -902,27 +1068,31 @@ def update_watchlist_endpoint(watchlist_id):
 
 
 @app.route('/api/watchlists/<int:watchlist_id>', methods=['DELETE'])
-def delete_watchlist_endpoint(watchlist_id):
+@require_auth
+def delete_watchlist_endpoint(user_id, watchlist_id):
     """Delete a watchlist."""
-    success = delete_watchlist(watchlist_id)
+    success = delete_watchlist(user_id, watchlist_id)
     if success:
+        log_event(user_id, 'watchlist.delete', 'watchlist', watchlist_id)
         return jsonify({'message': 'Watchlist deleted'})
     return jsonify({'error': 'Watchlist not found'}), 404
 
 
 @app.route('/api/watchlists/reorder', methods=['POST'])
-def reorder_watchlists_endpoint():
+@require_auth
+def reorder_watchlists_endpoint(user_id):
     """Reorder watchlists."""
     data = request.json
     if not data or 'order' not in data:
         return jsonify({'error': 'Order array is required'}), 400
 
-    reorder_watchlists(data['order'])
+    reorder_watchlists(user_id, data['order'])
     return jsonify({'message': 'Watchlists reordered'})
 
 
 @app.route('/api/watchlists/<int:watchlist_id>/items', methods=['POST'])
-def add_to_watchlist(watchlist_id):
+@require_auth
+def add_to_watchlist(user_id, watchlist_id):
     """Add a stock to a watchlist."""
     try:
         data = request.json
@@ -940,13 +1110,16 @@ def add_to_watchlist(watchlist_id):
                 name = name or stock_info.get('name', ticker)
                 sector = sector or stock_info.get('sector', '')
 
-        item_id = add_stock_to_watchlist(watchlist_id, ticker, name, sector)
+        item_id = add_stock_to_watchlist(user_id, watchlist_id, ticker, name, sector)
 
         if item_id is None:
             return jsonify({'error': 'Stock already in watchlist'}), 409
 
+        log_event(user_id, 'watchlist.stock_add', 'watchlist_item', item_id,
+                  {'ticker': ticker, 'watchlist_id': watchlist_id})
+
         # Start monitoring watchlist stocks so price alerts and signals fire
-        start_monitoring(ticker, name)
+        start_monitoring(user_id, ticker, name)
 
         return jsonify({'id': item_id, 'message': f'{ticker} added to watchlist'}), 201
 
@@ -955,28 +1128,31 @@ def add_to_watchlist(watchlist_id):
 
 
 @app.route('/api/watchlists/<int:watchlist_id>/items/<ticker>', methods=['DELETE'])
-def remove_from_watchlist(watchlist_id, ticker):
+@require_auth
+def remove_from_watchlist(user_id, watchlist_id, ticker):
     """Remove a stock from a watchlist."""
-    success = remove_stock_from_watchlist(watchlist_id, ticker.upper())
+    success = remove_stock_from_watchlist(user_id, watchlist_id, ticker.upper())
     if success:
         return jsonify({'message': f'{ticker} removed from watchlist'})
     return jsonify({'error': 'Stock not found in watchlist'}), 404
 
 
 @app.route('/api/watchlists/<int:watchlist_id>/reorder', methods=['POST'])
-def reorder_watchlist_items_endpoint(watchlist_id):
+@require_auth
+def reorder_watchlist_items_endpoint(user_id, watchlist_id):
     """Reorder items in a watchlist."""
     data = request.json
     if not data or 'order' not in data:
         return jsonify({'error': 'Order array is required'}), 400
 
-    reorder_watchlist_items(watchlist_id, data['order'])
+    reorder_watchlist_items(user_id, watchlist_id, data['order'])
     return jsonify({'message': 'Watchlist items reordered'})
 
 
 @app.route('/api/watchlists/move', methods=['POST'])
-def move_stock_between_watchlists():
-    """Move a stock from one watchlist to another."""
+@require_auth
+def move_stock_between_watchlists(user_id):
+    """Move a stock from one watchlist to another (user must own both watchlists)."""
     data = request.json
     required = ['ticker', 'from_watchlist_id', 'to_watchlist_id']
 
@@ -985,6 +1161,7 @@ def move_stock_between_watchlists():
             return jsonify({'error': f'{field} is required'}), 400
 
     success = move_stock_to_watchlist(
+        user_id,
         data['ticker'].upper(),
         data['from_watchlist_id'],
         data['to_watchlist_id']
@@ -996,9 +1173,10 @@ def move_stock_between_watchlists():
 
 
 @app.route('/api/watchlists/stock/<ticker>', methods=['GET'])
-def get_stock_watchlists(ticker):
+@require_auth
+def get_stock_watchlists(user_id, ticker):
     """Get all watchlists containing a specific stock."""
-    watchlists = get_stock_in_watchlists(ticker.upper())
+    watchlists = get_stock_in_watchlists(user_id, ticker.upper())
     return jsonify({'watchlists': watchlists})
 
 
@@ -1018,7 +1196,8 @@ def search_watchlist(watchlist_id):
 # ═══════════════════════════════════════════════════════════════
 
 @app.route('/api/trading/orders', methods=['POST'])
-def place_trading_order():
+@require_auth
+def place_trading_order(user_id):
     """Place a buy/sell order."""
     try:
         data = request.json
@@ -1050,6 +1229,7 @@ def place_trading_order():
 
         # Place order
         order_id = place_order(
+            user_id=user_id,
             ticker=ticker,
             name=name,
             side=side,
@@ -1059,6 +1239,9 @@ def place_trading_order():
             stop_price=data.get('stop_price'),
             limit_price=data.get('limit_price')
         )
+
+        log_event(user_id, 'trade.place', 'order', order_id,
+                  {'ticker': ticker, 'side': side, 'order_type': order_type, 'quantity': quantity})
 
         return jsonify({
             'id': order_id,
@@ -1074,50 +1257,63 @@ def place_trading_order():
 
 
 @app.route('/api/trading/orders', methods=['GET'])
-def get_trading_orders():
-    """Get all orders."""
+@require_auth
+def get_trading_orders(user_id):
+    """Get all orders for the authenticated user."""
     status = request.args.get('status')
     limit = request.args.get('limit', 50, type=int)
 
-    orders = get_orders(status=status, limit=limit)
+    orders = get_orders(user_id=user_id, status=status, limit=limit)
     return jsonify({'orders': orders})
 
 
 @app.route('/api/trading/orders/<int:order_id>', methods=['GET'])
-def get_trading_order(order_id):
-    """Get specific order details."""
+@require_auth
+def get_trading_order(user_id, order_id):
+    """Get specific order details, verifying ownership."""
     order = get_order_by_id(order_id)
 
     if not order:
+        return jsonify({'error': 'Order not found'}), 404
+
+    if order.get('user_id') != user_id:
         return jsonify({'error': 'Order not found'}), 404
 
     return jsonify(order)
 
 
 @app.route('/api/trading/orders/<int:order_id>/cancel', methods=['POST'])
-def cancel_trading_order(order_id):
-    """Cancel a pending order."""
+@require_auth
+def cancel_trading_order(user_id, order_id):
+    """Cancel a pending order, verifying ownership."""
+    order = get_order_by_id(order_id)
+    if not order or order.get('user_id') != user_id:
+        return jsonify({'error': 'Order not found or already executed'}), 404
+
     success = cancel_order(order_id)
 
     if success:
+        log_event(user_id, 'trade.cancel', 'order', order_id)
         return jsonify({'message': 'Order cancelled'})
 
     return jsonify({'error': 'Order not found or already executed'}), 404
 
 
 @app.route('/api/trading/trades', methods=['GET'])
-def get_trading_trades():
-    """Get trade history."""
+@require_auth
+def get_trading_trades(user_id):
+    """Get trade history for the authenticated user."""
     limit = request.args.get('limit', 50, type=int)
-    trades = get_trades(limit=limit)
+    trades = get_trades(user_id=user_id, limit=limit)
 
     return jsonify({'trades': trades})
 
 
 @app.route('/api/trading/portfolio', methods=['GET'])
-def get_trading_portfolio_endpoint():
+@require_auth
+def get_trading_portfolio_endpoint(user_id):
     """Get trading portfolio with live P&L."""
-    holdings = get_trading_portfolio()
+    holdings = get_trading_portfolio(user_id=user_id)
 
     # Enrich with current prices
     tickers = [h['ticker'] for h in holdings]
@@ -1136,7 +1332,7 @@ def get_trading_portfolio_endpoint():
                 holding['pnl'] = pnl
                 holding['pnl_percent'] = pnl_percent
 
-    balance = get_trading_balance()
+    balance = get_trading_balance(user_id=user_id)
 
     return jsonify({
         'holdings': holdings,
@@ -1146,16 +1342,19 @@ def get_trading_portfolio_endpoint():
 
 
 @app.route('/api/trading/balance', methods=['GET'])
-def get_trading_balance_endpoint():
-    """Get trading account balance."""
-    balance = get_trading_balance()
+@require_auth
+def get_trading_balance_endpoint(user_id):
+    """Get trading account balance for the authenticated user."""
+    balance = get_trading_balance(user_id=user_id)
     return jsonify(balance)
 
 
 @app.route('/api/trading/reset', methods=['POST'])
-def reset_trading_account_endpoint():
-    """Reset trading account (for testing)."""
-    reset_trading_account()
+@require_auth
+def reset_trading_account_endpoint(user_id):
+    """Reset trading account to starting balance."""
+    reset_trading_account(user_id=user_id)
+    log_event(user_id, 'account.reset', 'trading_balance')
     return jsonify({'message': 'Trading account reset to ₹1,00,000'})
 
 
@@ -1213,22 +1412,332 @@ def get_screener_sectors():
     return jsonify({'sectors': sectors})
 
 
+@app.route('/api/screener/natural', methods=['POST'])
+def natural_language_screener():
+    """
+    Parse a natural language query into screener filters using GPT-4/Claude,
+    then run the existing screen_stocks() function.
+
+    Body: { "query": "profitable IT stocks under 2000 with RSI below 40" }
+    """
+    data = request.json
+    if not data or 'query' not in data:
+        return jsonify({'error': 'query is required'}), 400
+
+    query = data['query'].strip()
+    if not query:
+        return jsonify({'error': 'query cannot be empty'}), 400
+
+    filters, parsed_description = _parse_nl_query_to_filters(query)
+
+    results = screen_stocks(filters)
+
+    return jsonify({
+        'query': query,
+        'parsed_description': parsed_description,
+        'filters_applied': filters,
+        'results': results,
+        'count': len(results),
+    })
+
+
+def _parse_nl_query_to_filters(query: str):
+    """
+    Use GPT-4 (or Claude fallback) to convert a natural-language stock
+    screening query into a structured filter dict for screen_stocks().
+    Returns (filters_dict, human_readable_description).
+    """
+    FILTER_SCHEMA = """{
+  "price_min": <number | null>,
+  "price_max": <number | null>,
+  "pe_min": <number | null>,
+  "pe_max": <number | null>,
+  "rsi_min": <number | null>,
+  "rsi_max": <number | null>,
+  "dividend_yield_min": <number | null>,
+  "market_cap_min": <number in INR | null>,
+  "market_cap_max": <number in INR | null>,
+  "volume_min": <number | null>,
+  "change_percent_min": <number | null>,
+  "change_percent_max": <number | null>,
+  "sectors": <list of strings from ["IT","Banking","Finance","Pharma","Auto","FMCG","Metal","Energy","Infra","Telecom","Conglomerate","Consumer"] | null>,
+  "week_52_high": <true | null>,
+  "week_52_low": <true | null>,
+  "description": "<plain English summary of what the user is looking for>"
+}"""
+
+    system_prompt = (
+        "You are a financial screener query parser for Indian stocks (NSE/BSE). "
+        "Convert the user's natural language query into a JSON filter object. "
+        "Only include fields that are explicitly or clearly implied in the query — "
+        "leave everything else null. "
+        "For ₹ amounts, use plain numbers (e.g. ₹2000 → 2000, '1 lakh' → 100000, '1 crore' → 10000000). "
+        "Respond with ONLY valid JSON, no explanation, no markdown fences.\n\n"
+        f"JSON schema:\n{FILTER_SCHEMA}"
+    )
+
+    import openai as _oai
+    import anthropic as _ant
+
+    openai_key = os.getenv('OPENAI_API_KEY', '')
+    anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
+
+    raw = None
+
+    # Try OpenAI first
+    if openai_key and not openai_key.startswith('sk-proj-...'):
+        try:
+            client = _oai.OpenAI(api_key=openai_key)
+            resp = client.chat.completions.create(
+                model='gpt-4o-mini',
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': query},
+                ],
+                max_tokens=400,
+                temperature=0,
+                response_format={'type': 'json_object'},
+            )
+            raw = resp.choices[0].message.content
+        except Exception as e:
+            logger.warning(f"NL screener OpenAI parse failed: {e}")
+
+    # Fallback to Anthropic
+    if raw is None and anthropic_key and not anthropic_key.startswith('sk-ant-...'):
+        try:
+            client = _ant.Anthropic(api_key=anthropic_key)
+            resp = client.messages.create(
+                model='claude-haiku-20240307',
+                max_tokens=400,
+                system=system_prompt,
+                messages=[{'role': 'user', 'content': query}],
+            )
+            raw = resp.content[0].text
+        except Exception as e:
+            logger.warning(f"NL screener Anthropic parse failed: {e}")
+
+    # Parse the JSON
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            description = parsed.pop('description', f'Filters from: "{query}"')
+            # Strip null values
+            filters = {k: v for k, v in parsed.items() if v is not None}
+            return filters, description
+        except Exception as e:
+            logger.warning(f"NL screener JSON parse failed: {e}")
+
+    # Rule-based fallback when AI is unavailable
+    filters, description = _rule_based_parse(query)
+    return filters, description
+
+
+def _rule_based_parse(query: str):
+    """Lightweight rule-based fallback for NL screener parsing."""
+    import re as _re
+    q = query.lower()
+    filters = {}
+
+    # Price
+    m = _re.search(r'under\s+(?:rs\.?|₹)?\s*(\d[\d,]*)', q)
+    if m: filters['price_max'] = float(m.group(1).replace(',', ''))
+    m = _re.search(r'above\s+(?:rs\.?|₹)?\s*(\d[\d,]*)', q)
+    if m: filters['price_min'] = float(m.group(1).replace(',', ''))
+
+    # RSI
+    m = _re.search(r'rsi\s+(?:below|under|<)\s*(\d+)', q)
+    if m: filters['rsi_max'] = float(m.group(1))
+    m = _re.search(r'rsi\s+(?:above|over|>)\s*(\d+)', q)
+    if m: filters['rsi_min'] = float(m.group(1))
+
+    # P/E
+    m = _re.search(r'p/?e\s+(?:below|under|<)\s*(\d+)', q)
+    if m: filters['pe_max'] = float(m.group(1))
+
+    # Sectors
+    sector_map = {
+        'it': 'IT', 'tech': 'IT', 'technology': 'IT',
+        'bank': 'Banking', 'banking': 'Banking',
+        'pharma': 'Pharma', 'pharmaceutical': 'Pharma',
+        'auto': 'Auto', 'automobile': 'Auto',
+        'fmcg': 'FMCG', 'consumer': 'Consumer',
+        'metal': 'Metal', 'steel': 'Metal',
+        'energy': 'Energy', 'oil': 'Energy',
+    }
+    found_sectors = [v for k, v in sector_map.items() if k in q]
+    if found_sectors: filters['sectors'] = list(set(found_sectors))
+
+    # 52-week
+    if '52' in q and 'high' in q: filters['week_52_high'] = True
+    if '52' in q and 'low' in q: filters['week_52_low'] = True
+
+    # Dividend
+    if 'dividend' in q:
+        m = _re.search(r'dividend.*?(\d+(?:\.\d+)?)\s*%', q)
+        filters['dividend_yield_min'] = float(m.group(1)) if m else 2.0
+
+    desc_parts = []
+    if 'price_max' in filters: desc_parts.append(f"Price under ₹{filters['price_max']:,.0f}")
+    if 'rsi_max' in filters: desc_parts.append(f"RSI below {filters['rsi_max']}")
+    if 'sectors' in filters: desc_parts.append(f"Sectors: {', '.join(filters['sectors'])}")
+    description = ' | '.join(desc_parts) if desc_parts else f'Query: "{query}"'
+
+    return filters, description
+
+
+# ═══════════════════════════════════════════════════════════════
+# CHART ZONES ENDPOINT (Support/Resistance + Fibonacci)
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/stocks/<ticker>/zones', methods=['GET'])
+def get_chart_zones(ticker):
+    """
+    Return support/resistance levels and Fibonacci retracement bands
+    for overlay on the price chart.
+    """
+    try:
+        ticker = ticker.upper()
+        period = request.args.get('period', '6mo')
+
+        sr   = find_support_resistance(ticker, period=period) or {}
+        fib  = calculate_fibonacci_levels(ticker, period=period) or {}
+
+        # Normalise support/resistance lists
+        supports    = sr.get('support_levels', [])
+        resistances = sr.get('resistance_levels', [])
+        current     = sr.get('current_price') or fib.get('current_price')
+
+        # Determine actionable entry / exit suggestion
+        entry_zone = exit_zone = None
+        if supports and current:
+            nearest_supp = min(supports, key=lambda x: abs(x - current))
+            entry_zone = {
+                'price': round(nearest_supp, 2),
+                'label': 'Entry Zone',
+                'note': 'Strong support level — good area to accumulate',
+            }
+        if resistances and current:
+            nearest_res = min(resistances, key=lambda x: abs(x - current))
+            exit_zone = {
+                'price': round(nearest_res, 2),
+                'label': 'Exit / Target Zone',
+                'note': 'Key resistance — consider booking partial profits here',
+            }
+
+        return jsonify({
+            'ticker': ticker,
+            'current_price': current,
+            'support_levels':    [round(v, 2) for v in supports],
+            'resistance_levels': [round(v, 2) for v in resistances],
+            'fibonacci_levels':  fib.get('levels', {}),
+            'swing_high':        fib.get('swing_high'),
+            'swing_low':         fib.get('swing_low'),
+            'entry_zone':        entry_zone,
+            'exit_zone':         exit_zone,
+            'analysis':          fib.get('analysis', ''),
+            'position':          sr.get('position', ''),
+        })
+    except Exception as e:
+        logger.error(f"Zones endpoint error for {ticker}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# QUICK SIGNAL ENDPOINT
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/stocks/<ticker>/quick-signal', methods=['GET'])
+def quick_signal(ticker):
+    """Get a lightweight BUY/SELL/HOLD signal using technicals + news sentiment."""
+    try:
+        ticker = ticker.upper()
+
+        # Technical indicators (calculate_technical_indicators takes a ticker string)
+        technicals = calculate_technical_indicators(ticker) or {}
+
+        rsi = technicals.get('rsi', 50) or 50
+        macd = technicals.get('macd', 0) or 0
+        macd_signal_val = technicals.get('macd_signal', 0) or 0
+        sma_20 = technicals.get('sma_20', 0) or 0
+        sma_50 = technicals.get('sma_50', 0) or 0
+
+        # Technical score (0–100)
+        tech_score = 50
+        if rsi <= 30:
+            tech_score += 25
+        elif rsi >= 70:
+            tech_score -= 25
+        elif rsi < 45:
+            tech_score += 10
+        elif rsi > 55:
+            tech_score -= 10
+
+        if macd > macd_signal_val:
+            tech_score += 10
+        elif macd < macd_signal_val:
+            tech_score -= 10
+
+        if sma_20 and sma_50:
+            if sma_20 > sma_50:
+                tech_score += 10
+            else:
+                tech_score -= 10
+
+        tech_score = max(0, min(100, tech_score))
+
+        # News sentiment score (0–100)
+        news = fetch_stock_news(ticker, max_articles=8)
+        pos = sum(1 for a in news if a.get('sentiment') == 'positive')
+        neg = sum(1 for a in news if a.get('sentiment') == 'negative')
+        total = len(news) if news else 1
+        news_score = 50 + (pos - neg) / total * 25
+        news_score = max(0, min(100, news_score))
+
+        # Weighted composite score
+        score = round(0.65 * tech_score + 0.35 * news_score, 1)
+
+        if score >= 62:
+            signal = 'BUY'
+        elif score <= 38:
+            signal = 'SELL'
+        else:
+            signal = 'HOLD'
+
+        return jsonify({
+            'ticker': ticker,
+            'signal': signal,
+            'score': score,
+            'rsi': round(rsi, 1),
+            'macd_bullish': macd > macd_signal_val,
+            'sma_bullish': bool(sma_20 and sma_50 and sma_20 > sma_50),
+            'positive_news': pos,
+            'negative_news': neg,
+            'neutral_news': total - pos - neg,
+        })
+    except Exception as e:
+        logger.error(f'quick-signal error for {ticker}: {e}')
+        return jsonify({'ticker': ticker, 'signal': 'HOLD', 'score': 50, 'error': str(e)})
+
+
 # ═══════════════════════════════════════════════════════════════
 # NEWS ENDPOINTS
+# NOTE: static routes (/api/news/market) MUST be registered before
+# the variable route (/api/news/<ticker>) so Flask doesn't capture
+# the literal string "market" as a ticker symbol.
 # ═══════════════════════════════════════════════════════════════
-
-@app.route('/api/news/<ticker>', methods=['GET'])
-def stock_news(ticker):
-    """Get news for a specific stock."""
-    news = fetch_stock_news(ticker.upper())
-    return jsonify({'ticker': ticker.upper(), 'news': news})
-
 
 @app.route('/api/news/market', methods=['GET'])
 def market_news():
     """Get general market news."""
     news = fetch_market_news()
     return jsonify({'news': news})
+
+
+@app.route('/api/news/<ticker>', methods=['GET'])
+def stock_news(ticker):
+    """Get news for a specific stock."""
+    news = fetch_stock_news(ticker.upper())
+    return jsonify({'ticker': ticker.upper(), 'news': news})
 
 
 @app.route('/api/news/<ticker>/sentiment', methods=['GET'])
@@ -1244,8 +1753,19 @@ def stock_sentiment(ticker):
 
 @socketio.on('connect')
 def handle_connect():
-    print(f"Client connected: {request.sid}")
-    emit('connected', {'status': 'connected', 'timestamp': datetime.now().isoformat()})
+    """Authenticate WebSocket connection via token query param."""
+    token = request.args.get('token')
+    if not token:
+        logger.warning(f"WebSocket rejected (no token): {request.sid}")
+        return False  # reject unauthenticated connection
+    try:
+        ws_user_id = verify_token(token)
+        session['ws_user_id'] = ws_user_id
+        print(f"Client connected: {request.sid} (user: {ws_user_id})")
+        emit('connected', {'status': 'connected', 'timestamp': datetime.now().isoformat()})
+    except Exception:
+        logger.warning(f"WebSocket rejected (invalid token): {request.sid}")
+        return False
 
 
 @socketio.on('disconnect')
@@ -1279,11 +1799,14 @@ def handle_unsubscribe(data):
 
 @socketio.on('request_portfolio_update')
 def handle_portfolio_update():
-    """Send current portfolio data."""
-    holdings = get_all_holdings()
+    """Send current portfolio data for the authenticated WebSocket user."""
+    ws_user_id = session.get('ws_user_id')
+    if not ws_user_id:
+        return
+    holdings = get_all_holdings(ws_user_id)
     if holdings:
         prices = get_bulk_prices([h['ticker'] for h in holdings])
-        portfolio = calculate_portfolio_value(prices)
+        portfolio = calculate_portfolio_value(ws_user_id, prices)
         emit('portfolio_update', portfolio)
 
 
@@ -1323,6 +1846,103 @@ def _extract_tickers(text):
 
 
 # ═══════════════════════════════════════════════════════════════
+# SECTOR HEATMAP & PEER COMPARISON ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/market/heatmap', methods=['GET'])
+def get_market_heatmap():
+    """Return per-sector aggregates and individual stock tiles for the sector heatmap."""
+    from concurrent.futures import ThreadPoolExecutor
+    from collections import defaultdict
+
+    def _fetch(ticker):
+        try:
+            p = get_stock_price(ticker)
+            if not p:
+                return None
+            meta = POPULAR_INDIAN_STOCKS.get(ticker, {})
+            return {
+                'ticker': ticker,
+                'name': meta.get('name', ticker),
+                'sector': meta.get('sector', 'Other'),
+                'change_percent': round(p.get('change_percent', 0), 2),
+                'current_price': p.get('current_price', 0),
+                'market_cap': p.get('market_cap', 0),
+            }
+        except Exception:
+            return None
+
+    tickers = list(POPULAR_INDIAN_STOCKS.keys())
+    stocks = []
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        for result in ex.map(_fetch, tickers):
+            if result:
+                stocks.append(result)
+
+    sector_map = defaultdict(list)
+    for s in stocks:
+        sector_map[s['sector']].append(s['change_percent'])
+
+    sectors = {
+        sec: round(sum(vals) / len(vals), 2)
+        for sec, vals in sector_map.items()
+    }
+
+    return jsonify({
+        'stocks': stocks,
+        'sectors': sectors,
+        'updated_at': datetime.now().isoformat(),
+    })
+
+
+@app.route('/api/stocks/<ticker>/peers', methods=['GET'])
+def get_peer_comparison(ticker):
+    """Return 4 closest sector peers with price, change%, RSI for peer comparison."""
+    ticker = ticker.upper()
+    meta = POPULAR_INDIAN_STOCKS.get(ticker)
+    if not meta:
+        return jsonify({'error': f'Unknown ticker: {ticker}'}), 404
+
+    sector = meta['sector']
+    peers = [t for t, m in POPULAR_INDIAN_STOCKS.items()
+             if m['sector'] == sector and t != ticker][:6]
+
+    def _build_row(t):
+        try:
+            p = get_stock_price(t)
+            tech = calculate_technical_indicators(t)
+            if not p:
+                return None
+            return {
+                'ticker': t,
+                'name': POPULAR_INDIAN_STOCKS.get(t, {}).get('name', t),
+                'sector': sector,
+                'current_price': p.get('current_price', 0),
+                'change_percent': round(p.get('change_percent', 0), 2),
+                'market_cap': p.get('market_cap', 0),
+                'rsi': round(tech['rsi'], 1) if tech else None,
+            }
+        except Exception:
+            return None
+
+    from concurrent.futures import ThreadPoolExecutor
+    rows = []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for r in ex.map(_build_row, peers):
+            if r:
+                rows.append(r)
+
+    self_row = _build_row(ticker)
+
+    return jsonify({
+        'ticker': ticker,
+        'sector': sector,
+        'self': self_row,
+        'peers': sorted(rows, key=lambda x: abs(x['change_percent']), reverse=True)[:4],
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 
@@ -1340,4 +1960,5 @@ if __name__ == '__main__':
 
     # Debug mode only in development (not in production for security)
     debug_mode = os.getenv('FLASK_ENV', 'production') == 'development'
-    socketio.run(app, host='0.0.0.0', port=5000, debug=debug_mode, use_reloader=False)
+    port = int(os.getenv('PORT', 5000))   # Render/Railway/Fly inject PORT at runtime
+    socketio.run(app, host='0.0.0.0', port=port, debug=debug_mode, use_reloader=False)

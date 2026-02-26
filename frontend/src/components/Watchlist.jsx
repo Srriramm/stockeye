@@ -3,6 +3,7 @@ import {
   Plus, Search, Trash2, MoreVertical, TrendingUp, TrendingDown, X,
 } from 'lucide-react';
 import axios from 'axios';
+import { authAxios } from '../utils/api';
 import { toast } from 'react-toastify';
 import wsManager from '../utils/websocket';
 
@@ -33,7 +34,7 @@ export default function Watchlist({ apiUrl }) {
 
   const fetchWatchlists = async () => {
     try {
-      const res = await axios.get(`${apiUrl}/api/watchlists`);
+      const res = await authAxios.get(`${apiUrl}/api/watchlists`);
       const lists = res.data.watchlists || [];
       setWatchlists(lists);
       if (!activeWatchlist && lists.length > 0) setActiveWatchlist(lists[0]);
@@ -43,14 +44,14 @@ export default function Watchlist({ apiUrl }) {
 
   const fetchWatchlistItems = async (id) => {
     try {
-      const res = await axios.get(`${apiUrl}/api/watchlists/${id}`);
+      const res = await authAxios.get(`${apiUrl}/api/watchlists/${id}`);
       setWatchlistItems(res.data.items || []);
     } catch { toast.error('Failed to load watchlist items'); }
   };
 
   const createWatchlist = async (name, color = '#2563eb') => {
     try {
-      await axios.post(`${apiUrl}/api/watchlists`, { name, color });
+      await authAxios.post(`${apiUrl}/api/watchlists`, { name, color });
       toast.success('Watchlist created');
       fetchWatchlists();
       setShowCreateModal(false);
@@ -60,7 +61,7 @@ export default function Watchlist({ apiUrl }) {
   const deleteWatchlist = async (id) => {
     if (!window.confirm('Delete this watchlist?')) return;
     try {
-      await axios.delete(`${apiUrl}/api/watchlists/${id}`);
+      await authAxios.delete(`${apiUrl}/api/watchlists/${id}`);
       toast.success('Watchlist deleted');
       fetchWatchlists();
       if (activeWatchlist?.id === id) setActiveWatchlist(null);
@@ -70,7 +71,7 @@ export default function Watchlist({ apiUrl }) {
   const addStockToWatchlist = async (ticker, name = '') => {
     if (!activeWatchlist) return;
     try {
-      await axios.post(`${apiUrl}/api/watchlists/${activeWatchlist.id}/items`, { ticker: ticker.toUpperCase(), name });
+      await authAxios.post(`${apiUrl}/api/watchlists/${activeWatchlist.id}/items`, { ticker: ticker.toUpperCase(), name });
       toast.success(`${ticker} added to watchlist`);
       fetchWatchlistItems(activeWatchlist.id);
       setShowAddModal(false);
@@ -84,7 +85,7 @@ export default function Watchlist({ apiUrl }) {
   const removeStock = async (ticker) => {
     if (!activeWatchlist) return;
     try {
-      await axios.delete(`${apiUrl}/api/watchlists/${activeWatchlist.id}/items/${ticker}`);
+      await authAxios.delete(`${apiUrl}/api/watchlists/${activeWatchlist.id}/items/${ticker}`);
       toast.success(`${ticker} removed`);
       fetchWatchlistItems(activeWatchlist.id);
     } catch { toast.error('Failed to remove stock'); }

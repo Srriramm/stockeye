@@ -16,7 +16,7 @@ from stock_data import (
 from news_monitor import fetch_stock_news, get_news_summary
 
 logger = logging.getLogger(__name__)
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')

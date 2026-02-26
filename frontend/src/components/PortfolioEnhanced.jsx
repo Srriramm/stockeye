@@ -8,6 +8,7 @@ import {
   ResponsiveContainer, BarChart, Bar
 } from 'recharts';
 import axios from 'axios';
+import { authAxios } from '../utils/api';
 import { toast } from 'react-toastify';
 import wsManager from '../utils/websocket';
 
@@ -35,8 +36,8 @@ export default function PortfolioEnhanced({ apiUrl, socket }) {
   const fetchPortfolio = useCallback(async () => {
     try {
       const [portfolioRes, historyRes] = await Promise.allSettled([
-        axios.get(`${apiUrl}/api/portfolio`),
-        axios.get(`${apiUrl}/api/portfolio/history?days=30`),
+        authAxios.get(`${apiUrl}/api/portfolio`),
+        authAxios.get(`${apiUrl}/api/portfolio/history?days=30`),
       ]);
       if (portfolioRes.status === 'fulfilled') setPortfolio(portfolioRes.value.data);
       if (historyRes.status === 'fulfilled') setPortfolioHistory(historyRes.value.data.history || []);
@@ -321,7 +322,7 @@ function AddStockModal({ apiUrl, onClose, onSuccess }) {
     e.preventDefault();
     setLoading(true);
     try {
-      await axios.post(`${apiUrl}/api/portfolio/add`, { ...formData, quantity: parseFloat(formData.quantity), buy_price: parseFloat(formData.buy_price) });
+      await authAxios.post(`${apiUrl}/api/portfolio/add`, { ...formData, quantity: parseFloat(formData.quantity), buy_price: parseFloat(formData.buy_price) });
       toast.success('Stock added to portfolio');
       onSuccess();
       onClose();
@@ -374,7 +375,7 @@ function AddStockModal({ apiUrl, onClose, onSuccess }) {
 async function removeStock(id, ticker, apiUrl, onSuccess) {
   if (!window.confirm(`Remove ${ticker} from portfolio?`)) return;
   try {
-    await axios.delete(`${apiUrl}/api/portfolio/${id}`);
+    await authAxios.delete(`${apiUrl}/api/portfolio/${id}`);
     toast.success(`${ticker} removed from portfolio`);
     onSuccess();
   } catch { toast.error('Failed to remove stock'); }

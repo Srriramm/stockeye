@@ -7,6 +7,8 @@
 .env.local
 .env.production
 .env.*.local
+backend/.env
+frontend/.env.local
 *.pem
 *.key
 *.crt
@@ -90,3 +92,5 @@ htmlcov/
 # ─── Keep Empty Directories ─────────────────────────────────────
 !database/.gitkeep
 !logs/.gitkeep
+.claude/
+.agent/

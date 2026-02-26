@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@supabase/supabase-js": "^2.97.0",
     "axios": "^1.6.0",
     "dompurify": "^3.3.1",
     "lightweight-charts": "^5.1.0",

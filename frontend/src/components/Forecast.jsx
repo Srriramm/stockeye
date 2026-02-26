@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
     TrendingUp, TrendingDown, Minus, Search, RefreshCw,
     AlertTriangle, Target, BarChart2, Zap, Shield,
-    ChevronRight, Info, Activity, Brain, Newspaper, CheckCircle, Lightbulb, Bot
+    ChevronRight, Info, Activity, Brain, Newspaper, CheckCircle, Lightbulb, Bot, Layers, ArrowUp, ArrowDown
 } from 'lucide-react';
 import axios from 'axios';
 import { ComposedChart, Area, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
@@ -32,6 +32,7 @@ export default function Forecast({ apiUrl }) {
     const [histChartData, setHistChartData] = useState([]);
     const [fcastChartData, setFcastChartData] = useState([]);
     const [histPeriod, setHistPeriod] = useState('3M');
+    const [zones, setZones] = useState(null);
 
     // Compute Y-axis domain from actual lower/upper values — avoids stacked area pulling domain to 0
     const fcastYDomain = React.useMemo(() => {
@@ -141,18 +142,22 @@ export default function Forecast({ apiUrl }) {
         setError('');
         setForecastData(null);
         setRiskData(null);
+        setZones(null);
         setHistChartData([]);
         setFcastChartData([]);
 
+
         try {
             const { period: yp, interval: yi } = PERIOD_MAP['3M'];
-            const [forecastRes, riskRes, histRes] = await Promise.all([
+            const [forecastRes, riskRes, histRes, zonesRes] = await Promise.all([
                 axios.get(`${apiUrl}/api/stocks/${t}/forecast?days=${days}`),
                 axios.get(`${apiUrl}/api/stocks/${t}/risk-profile`),
                 axios.get(`${apiUrl}/api/stocks/${t}/history?period=${yp}&interval=${yi}`),
+                axios.get(`${apiUrl}/api/stocks/${t}/zones?period=6mo`).catch(() => ({ data: null })),
             ]);
             setForecastData(forecastRes.data);
             setRiskData(riskRes.data);
+            setZones(zonesRes.data);
             setHistPeriod('3M');
 
             const hist = (histRes.data.data || []).map(d => ({
@@ -557,6 +562,9 @@ export default function Forecast({ apiUrl }) {
                         </div>
                     )}
 
+                    {/* ── Smart Entry/Exit Zones Panel ── */}
+                    {zones && <ZonesPanel zones={zones} formatINR={formatINR} />}
+
                     {/* ─── AI EVIDENCE PANELS ─────────────────────────────── */}
 
                     {/* 1. AI Narrative */}
@@ -903,3 +911,184 @@ function BacktestPanel({ backtest: bt, method }) {
         </div>
     );
 }
+
+// ─── Smart Entry/Exit Zones Panel ────────────────────────────────
+function ZonesPanel({ zones, formatINR }) {
+    if (!zones || zones.error) return null;
+
+    const curr = zones.current_price;
+    const supports = (zones.support_levels || []).slice(0, 4);
+    const resistances = (zones.resistance_levels || []).slice(0, 4);
+    const fibLevels = zones.fibonacci_levels || {};
+
+    // Sort fib levels high → low for display
+    const fibEntries = Object.entries(fibLevels)
+        .map(([label, price]) => ({ label, price: Number(price) }))
+        .sort((a, b) => b.price - a.price);
+
+    const pctFrom = (p) => curr ? `${((p - curr) / curr * 100).toFixed(1)}%` : '—';
+
+    return (
+        <div className="glass-panel p-6 space-y-5">
+            {/* Header */}
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <Layers size={16} className="text-violet-400" />
+                    <h3 className="text-slate-800 font-bold text-sm">Smart Entry/Exit Zones</h3>
+                </div>
+                <span className="text-[10px] text-slate-500 font-mono bg-white/5 border border-slate-100 px-2 py-0.5 rounded">
+                    6-Month Analysis
+                </span>
+            </div>
+
+            {/* Entry / Exit callout cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {zones.entry_zone && (
+                    <div className="rounded-xl p-4 flex items-start gap-3"
+                        style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.2)' }}>
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                            style={{ background: 'rgba(16,185,129,0.12)' }}>
+                            <ArrowDown size={14} style={{ color: '#10b981' }} />
+                        </div>
+                        <div>
+                            <div className="text-[10px] uppercase font-bold tracking-wider" style={{ color: '#10b981' }}>
+                                {zones.entry_zone.label}
+                            </div>
+                            <div className="text-lg font-black font-mono-nums mt-0.5" style={{ color: '#059669' }}>
+                                {formatINR(zones.entry_zone.price)}
+                            </div>
+                            <div className="text-[11px] mt-1" style={{ color: '#64748b' }}>
+                                {zones.entry_zone.note}
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {zones.exit_zone && (
+                    <div className="rounded-xl p-4 flex items-start gap-3"
+                        style={{ background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)' }}>
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                            style={{ background: 'rgba(239,68,68,0.12)' }}>
+                            <ArrowUp size={14} style={{ color: '#ef4444' }} />
+                        </div>
+                        <div>
+                            <div className="text-[10px] uppercase font-bold tracking-wider" style={{ color: '#ef4444' }}>
+                                {zones.exit_zone.label}
+                            </div>
+                            <div className="text-lg font-black font-mono-nums mt-0.5" style={{ color: '#dc2626' }}>
+                                {formatINR(zones.exit_zone.price)}
+                            </div>
+                            <div className="text-[11px] mt-1" style={{ color: '#64748b' }}>
+                                {zones.exit_zone.note}
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Support / Resistance levels */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Support */}
+                {supports.length > 0 && (
+                    <div>
+                        <div className="text-[10px] uppercase font-bold tracking-wider mb-2" style={{ color: '#10b981' }}>
+                            Support Levels
+                        </div>
+                        <div className="space-y-2">
+                            {supports.map((p, i) => {
+                                const dist = curr ? Math.abs((p - curr) / curr * 100) : 0;
+                                return (
+                                    <div key={i} className="flex items-center gap-3">
+                                        <span className="text-xs font-mono font-bold w-28 text-emerald-500">
+                                            {formatINR(p)}
+                                        </span>
+                                        <div className="flex-1 h-2 rounded-full overflow-hidden bg-slate-100">
+                                            <div
+                                                className="h-full rounded-full"
+                                                style={{
+                                                    width: `${Math.min(100, 100 - (i * 15))}%`,
+                                                    background: 'linear-gradient(90deg, #10b981, #34d399)',
+                                                }}
+                                            />
+                                        </div>
+                                        <span className="text-[10px] font-mono text-slate-500 w-12 text-right">
+                                            {pctFrom(p)}
+                                        </span>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+
+                {/* Resistance */}
+                {resistances.length > 0 && (
+                    <div>
+                        <div className="text-[10px] uppercase font-bold tracking-wider mb-2" style={{ color: '#f43f5e' }}>
+                            Resistance Levels
+                        </div>
+                        <div className="space-y-2">
+                            {resistances.map((p, i) => (
+                                <div key={i} className="flex items-center gap-3">
+                                    <span className="text-xs font-mono font-bold w-28 text-rose-500">
+                                        {formatINR(p)}
+                                    </span>
+                                    <div className="flex-1 h-2 rounded-full overflow-hidden bg-slate-100">
+                                        <div
+                                            className="h-full rounded-full"
+                                            style={{
+                                                width: `${Math.min(100, 100 - (i * 15))}%`,
+                                                background: 'linear-gradient(90deg, #f43f5e, #fb7185)',
+                                            }}
+                                        />
+                                    </div>
+                                    <span className="text-[10px] font-mono text-slate-500 w-12 text-right">
+                                        {pctFrom(p)}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Fibonacci levels */}
+            {fibEntries.length > 0 && (
+                <div>
+                    <div className="text-[10px] uppercase font-bold tracking-wider mb-2 text-slate-500">
+                        Fibonacci Retracement Levels
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                        {fibEntries.map(({ label, price }) => {
+                            const isCurrent = curr && Math.abs(price - curr) / curr < 0.01;
+                            return (
+                                <div
+                                    key={label}
+                                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg"
+                                    style={{
+                                        background: isCurrent ? 'rgba(99,102,241,0.12)' : '#f8fafc',
+                                        border: `1px solid ${isCurrent ? 'rgba(99,102,241,0.4)' : '#e2e8f0'}`,
+                                    }}
+                                >
+                                    <span className="text-[10px] font-bold" style={{ color: isCurrent ? '#6366f1' : '#94a3b8' }}>
+                                        {label}
+                                    </span>
+                                    <span className="text-xs font-mono font-semibold" style={{ color: isCurrent ? '#4f46e5' : '#334155' }}>
+                                        {formatINR(price)}
+                                    </span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {/* Context note */}
+            {zones.analysis && (
+                <p className="text-slate-500 text-xs italic border-t border-slate-100 pt-3 leading-relaxed">
+                    {zones.analysis}
+                </p>
+            )}
+        </div>
+    );
+}
+

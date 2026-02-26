@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, Bot, User, Trash2, Loader2, Sparkles, TrendingUp, Shield, Target, Wallet } from 'lucide-react';
 import axios from 'axios';
+import { authAxios } from '../utils/api';
 import DOMPurify from 'dompurify';
 import { toast } from 'react-toastify';
 
@@ -29,7 +30,7 @@ export default function Chatbot({ apiUrl }) {
 
   const fetchHistory = async () => {
     try {
-      const res = await axios.get(`${apiUrl}/api/chat/history?limit=50`);
+      const res = await authAxios.get(`${apiUrl}/api/chat/history?limit=50`);
       if (res.data.messages?.length > 0) {
         setMessages(res.data.messages.map(m => ({ role: m.role, content: m.content, timestamp: m.created_at })));
         setShowQuickQuestions(false);
@@ -45,7 +46,7 @@ export default function Chatbot({ apiUrl }) {
     setMessages(prev => [...prev, { role: 'user', content: msg, timestamp: new Date().toISOString() }]);
     setLoading(true);
     try {
-      const res = await axios.post(`${apiUrl}/api/chat`, { message: msg, provider: preferredProvider });
+      const res = await authAxios.post(`${apiUrl}/api/chat`, { message: msg, provider: preferredProvider });
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: res.data.response,
@@ -70,7 +71,7 @@ export default function Chatbot({ apiUrl }) {
 
   const clearChat = async () => {
     try {
-      await axios.post(`${apiUrl}/api/chat/clear`);
+      await authAxios.post(`${apiUrl}/api/chat/clear`);
       setMessages([]);
       setShowQuickQuestions(true);
       toast.success('Conversation cleared');

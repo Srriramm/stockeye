@@ -4,19 +4,32 @@ Integrates News API, RSS feeds, and Reddit for market sentiment.
 """
 
 import os
+import re
 import requests
 import json
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+try:
+    import openai as _openai_module
+except ImportError:
+    _openai_module = None
+
+try:
+    import anthropic as _anthropic_module
+except ImportError:
+    _anthropic_module = None
+
 logger = logging.getLogger(__name__)
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
-NEWS_API_KEY = os.getenv('NEWS_API_KEY', '')
-REDDIT_CLIENT_ID = os.getenv('REDDIT_CLIENT_ID', '')
+NEWS_API_KEY        = os.getenv('NEWS_API_KEY', '')
+REDDIT_CLIENT_ID    = os.getenv('REDDIT_CLIENT_ID', '')
 REDDIT_CLIENT_SECRET = os.getenv('REDDIT_CLIENT_SECRET', '')
+_OPENAI_API_KEY     = os.getenv('OPENAI_API_KEY', '')
+_ANTHROPIC_API_KEY  = os.getenv('ANTHROPIC_API_KEY', '')
 
 # ─── Cache ──────────────────────────────────────────────────────
 import time
@@ -74,10 +87,88 @@ def _get_search_term(ticker):
     return TICKER_TO_COMPANY.get(ticker.upper(), ticker)
 
 
+# ─── Generic article patterns to exclude ───────────────────────
+
+_GENERIC_PATTERNS = [
+    'day trading guide',
+    'ahead of market',
+    '10 things that will',
+    'weekly wrap',
+    'market outlook for the week',
+    'opening bell',
+    'closing bell',
+    'nifty prediction',
+    'sensex prediction',
+    'top stocks to watch',
+    'stocks to buy today',
+    'intraday supports',
+    'intraday tips',
+]
+
+
+# Words that are too generic to use as a single relevance signal on their own.
+# Any ticker whose company name contains these words will require EITHER the
+# ticker symbol itself OR ≥2 significant name words to appear in the article.
+_GENERIC_INDUSTRY_WORDS = {
+    'oil', 'gas', 'bank', 'steel', 'coal', 'tech', 'power', 'energy',
+    'motor', 'motors', 'pharma', 'finance', 'natural', 'industries',
+    'enterprise', 'enterprises', 'limited', 'india', 'national',
+}
+
+
+def _is_relevant(article, ticker, company_name):
+    """Return True only if the article title is about this specific stock."""
+    title = (article.get('title', '') + ' ' + article.get('description', '')).lower()
+
+    # Hard exclude generic daily guides regardless of stock
+    for pat in _GENERIC_PATTERNS:
+        if pat in title:
+            return False
+
+    ticker_lower = ticker.lower()
+
+    # Direct ticker mention is always a hit
+    if ticker_lower in title:
+        return True
+
+    # Collect significant words from the company name (>3 chars, not generic)
+    significant_words = [
+        w for w in company_name.lower().split()
+        if len(w) > 3 and w not in _GENERIC_INDUSTRY_WORDS
+    ]
+
+    if significant_words:
+        hits = sum(1 for w in significant_words if w in title)
+        # Require the article to mention at least 2 significant name words,
+        # OR at least 1 if none of the name words are ambiguous/generic.
+        threshold = 2 if any(w in _GENERIC_INDUSTRY_WORDS
+                             for w in company_name.lower().split()) else 1
+        return hits >= threshold
+
+    # Fallback: any word longer than 3 chars from company name matches
+    for word in company_name.lower().split():
+        if len(word) > 3 and word in title:
+            return True
+    return False
+
+
+def _deduplicate(articles):
+    """Remove articles with duplicate or near-identical titles."""
+    seen = set()
+    out = []
+    for a in articles:
+        key = ' '.join(a.get('title', '').lower().split())[:80]
+        if key and key not in seen:
+            seen.add(key)
+            out.append(a)
+    return out
+
+
 # ─── News API Integration ──────────────────────────────────────
 
 def fetch_stock_news(ticker, days=7, max_articles=10):
     """Fetch recent news for a specific stock using News API."""
+    ticker = ticker.upper()
     cache_key = f"news_{ticker}"
     cached = _get_news_cached(cache_key)
     if cached:
@@ -96,7 +187,7 @@ def fetch_stock_news(ticker, days=7, max_articles=10):
                 'from': from_date,
                 'sortBy': 'relevancy',
                 'language': 'en',
-                'pageSize': max_articles,
+                'pageSize': max_articles * 2,  # fetch extra to compensate for filtering
                 'apiKey': NEWS_API_KEY,
             }
             response = requests.get(url, params=params, timeout=10)
@@ -110,14 +201,22 @@ def fetch_stock_news(ticker, days=7, max_articles=10):
                         'source': article.get('source', {}).get('name', 'Unknown'),
                         'published_at': article.get('publishedAt', ''),
                         'image': article.get('urlToImage', ''),
-                        'sentiment': _quick_sentiment(article.get('title', '') + ' ' + (article.get('description', '') or '')),
+                        'sentiment': 'neutral',  # will be overwritten by AI below
                     })
         except Exception as e:
             print(f"News API error for {ticker}: {e}")
 
-    # Fallback: Fetch from Google News RSS
+    # Fallback: Fetch from Google News RSS (company-specific query, no generic suffix)
     if not articles:
         articles = _fetch_google_news_rss(search_term, ticker)
+
+    # Filter to stock-relevant articles only, then deduplicate
+    articles = [a for a in articles if _is_relevant(a, ticker, search_term)]
+    articles = _deduplicate(articles)
+    articles = articles[:max_articles]
+
+    # ── AI-classify all headlines in ONE call ───────────────────────────────
+    _enrich_with_ai_sentiment(articles)
 
     _set_news_cached(cache_key, articles)
     return articles
@@ -134,9 +233,11 @@ def fetch_market_news(max_articles=15):
 
     if NEWS_API_KEY:
         try:
+            from_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
             url = 'https://newsapi.org/v2/everything'
             params = {
                 'q': '(NIFTY OR SENSEX OR "Indian stock market" OR NSE OR BSE) AND (stocks OR market OR trading)',
+                'from': from_date,
                 'sortBy': 'publishedAt',
                 'language': 'en',
                 'pageSize': max_articles,
@@ -152,13 +253,16 @@ def fetch_market_news(max_articles=15):
                         'url': article.get('url', ''),
                         'source': article.get('source', {}).get('name', 'Unknown'),
                         'published_at': article.get('publishedAt', ''),
-                        'sentiment': _quick_sentiment(article.get('title', '') + ' ' + (article.get('description', '') or '')),
+                        'sentiment': 'neutral',  # will be overwritten by AI below
                     })
         except Exception as e:
             print(f"Market news error: {e}")
 
     if not articles:
         articles = _fetch_google_news_rss('Indian stock market NIFTY SENSEX', 'MARKET')
+
+    # ── AI-classify all headlines in ONE call ───────────────────────────────
+    _enrich_with_ai_sentiment(articles)
 
     _set_news_cached(cache_key, articles)
     return articles
@@ -170,7 +274,7 @@ def _fetch_google_news_rss(query, ticker):
     try:
         from bs4 import BeautifulSoup
         encoded_query = requests.utils.quote(query)
-        url = f'https://news.google.com/rss/search?q={encoded_query}+stock+market&hl=en-IN&gl=IN&ceid=IN:en'
+        url = f'https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en'
         response = requests.get(url, timeout=10)
 
         if response.status_code == 200:
@@ -191,7 +295,7 @@ def _fetch_google_news_rss(query, ticker):
                     'source': source,
                     'published_at': pub_date,
                     'image': '',
-                    'sentiment': _quick_sentiment(title + ' ' + description),
+                    'sentiment': 'neutral',  # enriched by caller via _enrich_with_ai_sentiment
                 })
     except Exception as e:
         print(f"Google News RSS error: {e}")
@@ -288,22 +392,130 @@ NEGATIVE_WORDS = {
 }
 
 
+# Common negation words — when one precedes a sentiment word, flip its polarity
+_NEGATION_WORDS = {'not', 'no', 'never', 'neither', 'without', 'unable', 'fail',
+                   'failed', 'fails', 'cannot', "can't", "won't", "doesn't",
+                   "isn't", "wasn't", "aren't", 'hardly', 'barely', 'rarely'}
+
+
 def _quick_sentiment(text):
-    """Quick rule-based sentiment analysis without API calls."""
+    """Rule-based sentiment — used only as a last-resort fallback."""
     if not text:
         return 'neutral'
 
     text_lower = text.lower()
-    words = set(text_lower.split())
+    tokens = re.findall(r"[\w']+", text_lower)
 
-    positive_count = len(words.intersection(POSITIVE_WORDS))
-    negative_count = len(words.intersection(NEGATIVE_WORDS))
+    positive_count = 0
+    negative_count = 0
+
+    for i, word in enumerate(tokens):
+        negated = i > 0 and tokens[i - 1] in _NEGATION_WORDS
+        if word in POSITIVE_WORDS:
+            if negated:
+                negative_count += 1
+            else:
+                positive_count += 1
+        elif word in NEGATIVE_WORDS:
+            if negated:
+                positive_count += 1
+            else:
+                negative_count += 1
 
     if positive_count > negative_count:
         return 'positive'
     elif negative_count > positive_count:
         return 'negative'
     return 'neutral'
+
+
+def _ai_sentiment_batch(headlines: list[str]) -> list[str]:
+    """
+    Send all headlines in ONE API call and get back a list of
+    'positive' | 'negative' | 'neutral' labels.
+
+    Tries OpenAI (gpt-4o-mini) first, then Anthropic (claude-haiku),
+    then rule-based fallback.
+    """
+    if not headlines:
+        return []
+
+    numbered = '\n'.join(f"{i+1}. {h}" for i, h in enumerate(headlines))
+    system_prompt = (
+        "You are a financial news sentiment classifier for Indian stock markets. "
+        "For each numbered headline, output ONLY a JSON array of strings where each "
+        "string is exactly one of: positive, negative, neutral. "
+        "The array length MUST equal the number of input headlines. "
+        "Return ONLY the JSON array, no explanation."
+    )
+    user_prompt = f"Classify the sentiment of each headline:\n{numbered}"
+
+    # ── Try OpenAI first ────────────────────────────────────────────
+    if _openai_module and _OPENAI_API_KEY:
+        try:
+            client = _openai_module.OpenAI(api_key=_OPENAI_API_KEY)
+            resp = client.chat.completions.create(
+                model='gpt-4o-mini',
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user',   'content': user_prompt},
+                ],
+                max_tokens=len(headlines) * 12,
+                temperature=0,
+            )
+            raw = resp.choices[0].message.content.strip()
+            # Strip markdown code fences if present (gpt-4o-mini sometimes wraps in ```json ... ```)
+            raw = re.sub(r'^```[a-z]*\s*', '', raw, flags=re.IGNORECASE)
+            raw = re.sub(r'\s*```$', '', raw)
+            labels = json.loads(raw)
+            if isinstance(labels, list) and len(labels) == len(headlines):
+                cleaned = []
+                for lbl in labels:
+                    s = str(lbl).lower().strip()
+                    cleaned.append(s if s in ('positive', 'negative', 'neutral') else 'neutral')
+                logger.info(f"AI sentiment (OpenAI): classified {len(headlines)} headlines")
+                return cleaned
+        except Exception as e:
+            logger.warning(f"OpenAI batch sentiment failed: {e}")
+
+    # ── Try Anthropic as fallback ────────────────────────────────────
+    if _anthropic_module and _ANTHROPIC_API_KEY:
+        try:
+            client = _anthropic_module.Anthropic(api_key=_ANTHROPIC_API_KEY)
+            msg = client.messages.create(
+                model='claude-haiku-20240307',
+                max_tokens=len(headlines) * 12,
+                messages=[{'role': 'user', 'content': f"{system_prompt}\n\n{user_prompt}"}],
+            )
+            raw = msg.content[0].text.strip()
+            labels = json.loads(raw)
+            if isinstance(labels, list) and len(labels) == len(headlines):
+                cleaned = []
+                for lbl in labels:
+                    s = str(lbl).lower().strip()
+                    cleaned.append(s if s in ('positive', 'negative', 'neutral') else 'neutral')
+                logger.info(f"AI sentiment (Anthropic): classified {len(headlines)} headlines")
+                return cleaned
+        except Exception as e:
+            logger.warning(f"Anthropic batch sentiment failed: {e}")
+
+    # ── Final rule-based fallback ────────────────────────────────────
+    logger.info("Falling back to rule-based sentiment (no AI key available)")
+    return [_quick_sentiment(h) for h in headlines]
+
+
+def _enrich_with_ai_sentiment(articles: list) -> None:
+    """In-place: set 'sentiment' on each article using batched AI."""
+    if not articles:
+        return
+    headlines = [
+        (a.get('title') or '') + '. ' + (a.get('description') or '')
+        for a in articles
+    ]
+    labels = _ai_sentiment_batch(headlines)
+    for article, label in zip(articles, labels):
+        article['sentiment'] = label
+
 
 
 def analyze_sentiment_ai(text, openai_client=None):
@@ -350,8 +562,12 @@ def get_news_summary(ticker):
     total_news = len(news)
     news_score = ((news_sentiment['positive'] - news_sentiment['negative']) / total_news) if total_news > 0 else 0
 
-    # Combine scores
-    combined_score = (news_score + reddit.get('sentiment_score', 0)) / 2
+    # Combine scores — only include Reddit when it actually has data so that
+    # an unconfigured Reddit account doesn't drag every score toward neutral.
+    scores = [news_score]
+    if reddit.get('discussions'):
+        scores.append(reddit['sentiment_score'])
+    combined_score = sum(scores) / len(scores)
 
     return {
         'ticker': ticker.upper(),

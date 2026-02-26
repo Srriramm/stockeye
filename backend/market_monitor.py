@@ -14,22 +14,15 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Windows console defaults to cp1252 which can't encode ₹ or emoji.
-# Reconfigure stdout/stderr to UTF-8 so alert messages print correctly.
-if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-if sys.platform == 'win32' and hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from stock_data import get_stock_price, calculate_technical_indicators, get_market_indices
 from news_monitor import fetch_stock_news, get_reddit_sentiment, _quick_sentiment
 from portfolio_manager import (
-    get_monitored_stocks, create_alert, update_monitor_baseline,
-    get_active_price_alerts, trigger_price_alert, save_portfolio_snapshot,
-    get_all_holdings
+    create_alert, trigger_price_alert, save_portfolio_snapshot,
+    get_all_monitored_stocks_global, get_all_active_price_alerts_global,
+    get_all_holdings_global, update_monitor_baseline_global
 )
 from stock_data import get_bulk_prices
 
@@ -130,7 +123,7 @@ class MonitoringService:
 
     def _check_all_stocks(self):
         """Check all monitored stocks for alerts."""
-        monitored = get_monitored_stocks(active_only=True)
+        monitored = get_all_monitored_stocks_global(active_only=True)
         if not monitored:
             return
 
@@ -145,7 +138,7 @@ class MonitoringService:
             try:
                 self._check_stock(ticker, stock)
                 if run_brain:
-                    self._run_brain_check(ticker)
+                    self._run_brain_check(ticker, stock)
             except Exception as e:
                 logger.error(f"Error checking {ticker}: {e}")
 
@@ -157,13 +150,15 @@ class MonitoringService:
 
         current_price = price_data['current_price']
         baseline_price = monitor_data.get('price_baseline', 0)
+        # Extract user_id once; used for per-user cooldown checks throughout this method
+        user_id = monitor_data.get('user_id', 'system')
 
         # ─── Initialize baseline on first check ─────────────────
         # When a stock is newly added, baseline_price is 0.
         # Set it to current price so subsequent cycles compute real % change.
         if baseline_price == 0 and current_price > 0:
             avg_vol = price_data.get('avg_volume', 0)
-            update_monitor_baseline(ticker, current_price, avg_vol)
+            update_monitor_baseline_global(ticker, current_price, avg_vol)
             logger.info(f"Initialized baseline for {ticker}: {current_price:,.2f}")
             return  # Skip checks this cycle — no historical baseline to compare against
 
@@ -179,7 +174,7 @@ class MonitoringService:
             price_change_pct = ((current_price - baseline_price) / baseline_price) * 100
 
             if abs(price_change_pct) >= PRICE_ALERT_THRESHOLD:
-                if not self._is_on_cooldown(ticker, 'price_movement'):
+                if not self._is_on_cooldown(ticker, 'price_movement', user_id=user_id):
                     direction = 'up' if price_change_pct > 0 else 'down'
                     severity = 'warning' if abs(price_change_pct) >= 5 else 'info'
                     sign = '+' if price_change_pct > 0 else ''
@@ -189,7 +184,8 @@ class MonitoringService:
                                if avg_vol > 0 else '')
 
                     alert_msg = f"{ticker} {sign}{price_change_pct:.1f}% → ₹{current_price:,.2f}{vol_str}"
-                    alert_id = create_alert(ticker, 'price_movement', alert_msg, severity, json.dumps({
+                    user_id = monitor_data.get('user_id', 'system')
+                    alert_id = create_alert(user_id, ticker, 'price_movement', alert_msg, severity, json.dumps({
                         'current_price': current_price,
                         'baseline_price': baseline_price,
                         'change_percent': round(price_change_pct, 2),
@@ -203,7 +199,7 @@ class MonitoringService:
                     self._set_cooldown(ticker, 'price_movement')
 
                 # Always update baseline after movement so next alert is relative to new price
-                update_monitor_baseline(ticker, current_price, monitor_data.get('volume_avg_30d', 0))
+                update_monitor_baseline_global(ticker, current_price, monitor_data.get('volume_avg_30d', 0))
 
             if price_change_pct >= 3.0:
                 price_surge = True
@@ -215,12 +211,13 @@ class MonitoringService:
         if avg_volume > 0 and current_volume > 0:
             volume_ratio = current_volume / avg_volume
             if volume_ratio >= VOLUME_SPIKE_MULTIPLIER:
-                if not self._is_on_cooldown(ticker, 'volume_spike'):
+                if not self._is_on_cooldown(ticker, 'volume_spike', user_id=user_id):
                     alert_msg = (
                         f"{ticker} volume surge: {volume_ratio:.1f}x 30-day average "
                         f"({current_volume:,} vs avg {avg_volume:,.0f}) — possible institutional activity"
                     )
-                    alert_id = create_alert(ticker, 'volume_spike', alert_msg, 'warning', json.dumps({
+                    user_id = monitor_data.get('user_id', 'system')
+                    alert_id = create_alert(user_id, ticker, 'volume_spike', alert_msg, 'warning', json.dumps({
                         'current_volume': current_volume,
                         'avg_volume': avg_volume,
                         'ratio': round(volume_ratio, 2),
@@ -241,9 +238,10 @@ class MonitoringService:
             if technicals:
                 rsi = technicals.get('rsi', 50)
 
-                if rsi >= RSI_OVERBOUGHT and not self._is_on_cooldown(ticker, 'technical'):
+                if rsi >= RSI_OVERBOUGHT and not self._is_on_cooldown(ticker, 'technical', user_id=user_id):
                     alert_msg = f"{ticker} RSI {rsi:.0f} — overbought zone. Consider booking partial profits."
-                    create_alert(ticker, 'technical', alert_msg, 'warning')
+                    user_id = monitor_data.get('user_id', 'system')
+                    create_alert(user_id, ticker, 'technical', alert_msg, 'warning')
                     emit_alert({
                         'ticker': ticker, 'type': 'technical',
                         'message': alert_msg, 'severity': 'warning',
@@ -251,9 +249,10 @@ class MonitoringService:
                     })
                     self._set_cooldown(ticker, 'technical')
 
-                elif rsi <= RSI_OVERSOLD and not self._is_on_cooldown(ticker, 'technical'):
+                elif rsi <= RSI_OVERSOLD and not self._is_on_cooldown(ticker, 'technical', user_id=user_id):
                     alert_msg = f"{ticker} RSI {rsi:.0f} — oversold zone. Potential buying opportunity."
-                    create_alert(ticker, 'technical', alert_msg, 'info')
+                    user_id = monitor_data.get('user_id', 'system')
+                    create_alert(user_id, ticker, 'technical', alert_msg, 'info')
                     emit_alert({
                         'ticker': ticker, 'type': 'technical',
                         'message': alert_msg, 'severity': 'info',
@@ -265,12 +264,13 @@ class MonitoringService:
                 sma_20 = technicals.get('sma_20', 0)
                 sma_50 = technicals.get('sma_50', 0)
                 if sma_20 and sma_50 and current_price > sma_50 and sma_20 > sma_50:
-                    if not self._is_on_cooldown(ticker, 'pattern'):
+                    if not self._is_on_cooldown(ticker, 'pattern', user_id=user_id):
                         alert_msg = (
                             f"{ticker} bullish momentum — price above 50-day SMA "
                             f"with SMA20 crossing above SMA50"
                         )
-                        create_alert(ticker, 'pattern', alert_msg, 'info')
+                        user_id = monitor_data.get('user_id', 'system')
+                        create_alert(user_id, ticker, 'pattern', alert_msg, 'info')
                         emit_alert({
                             'ticker': ticker, 'type': 'pattern',
                             'message': alert_msg, 'severity': 'info',
@@ -286,14 +286,15 @@ class MonitoringService:
             neg_articles = [a for a in news if a.get('sentiment') == 'negative']
             pos_articles = [a for a in news if a.get('sentiment') == 'positive']
 
-            if neg_articles and not self._is_on_cooldown(ticker, 'news'):
+            if neg_articles and not self._is_on_cooldown(ticker, 'news', user_id=user_id):
                 neg_count = len(neg_articles)
                 title = neg_articles[0]['title'][:80]
                 alert_msg = (
                     f"{ticker}: {neg_count} negative news article{'s' if neg_count > 1 else ''} today "
                     f"— monitor closely. \"{title}\""
                 )
-                create_alert(ticker, 'news', alert_msg, 'warning')
+                user_id = monitor_data.get('user_id', 'system')
+                create_alert(user_id, ticker, 'news', alert_msg, 'warning')
                 emit_alert({
                     'ticker': ticker, 'type': 'news',
                     'message': alert_msg, 'severity': 'warning',
@@ -308,12 +309,13 @@ class MonitoringService:
 
         # ─── Booming Detection (multi-signal confluence) ────────
         if price_surge and volume_surge and news_positive:
-            if not self._is_on_cooldown(ticker, 'booming'):
+            if not self._is_on_cooldown(ticker, 'booming', user_id=user_id):
                 alert_msg = (
                     f"🔥 {ticker} is BOOMING — +{price_change_pct:.1f}% with {volume_ratio:.1f}x "
                     f"volume surge and positive news! Strong momentum signal."
                 )
-                alert_id = create_alert(ticker, 'price_movement', alert_msg, 'critical', json.dumps({
+                user_id = monitor_data.get('user_id', 'system')
+                alert_id = create_alert(user_id, ticker, 'price_movement', alert_msg, 'critical', json.dumps({
                     'current_price': current_price,
                     'price_change': round(price_change_pct, 2),
                     'volume_ratio': round(volume_ratio, 2),
@@ -326,9 +328,9 @@ class MonitoringService:
                 self._set_cooldown(ticker, 'booming')
 
     def _check_price_alerts(self):
-        """Check custom price alerts set by the user."""
+        """Check custom price alerts set by all users."""
         try:
-            price_alerts = get_active_price_alerts()
+            price_alerts = get_all_active_price_alerts_global()
             for alert in price_alerts:
                 ticker = alert['ticker']
                 target = alert['target_price']
@@ -347,9 +349,10 @@ class MonitoringService:
                     triggered = True
 
                 if triggered:
-                    trigger_price_alert(alert['id'])
+                    user_id = alert.get('user_id', 'system')
+                    trigger_price_alert(user_id, alert['id'])
                     alert_msg = f"🎯 Price Alert: {ticker} reached ₹{current_price:,.2f} (target: ₹{target:,.2f} {direction})"
-                    create_alert(ticker, 'price_alert', alert_msg, 'critical')
+                    create_alert(user_id, ticker, 'price_alert', alert_msg, 'critical')
                     emit_alert({
                         'ticker': ticker, 'type': 'price_alert',
                         'message': alert_msg, 'severity': 'critical',
@@ -359,34 +362,43 @@ class MonitoringService:
             logger.error(f"Price alerts check error: {e}")
 
     def _check_portfolio_snapshot(self):
-        """Save portfolio snapshot periodically."""
+        """Save portfolio snapshot per-user, periodically."""
         try:
-            holdings = get_all_holdings()
+            holdings = get_all_holdings_global()
             if not holdings:
                 return
 
-            tickers = [h['ticker'] for h in holdings]
-            prices = get_bulk_prices(tickers)
-
-            total_value = 0
-            total_investment = 0
+            # Group holdings by user_id for per-user snapshots
+            from collections import defaultdict
+            user_holdings = defaultdict(list)
             for h in holdings:
-                price = prices.get(h['ticker'], h['buy_price'])
-                total_value += h['quantity'] * price
-                total_investment += h['quantity'] * h['buy_price']
+                user_holdings[h['user_id']].append(h)
 
-            pnl = total_value - total_investment
-            pnl_percent = (pnl / total_investment * 100) if total_investment > 0 else 0
+            all_tickers = list({h['ticker'] for h in holdings})
+            prices = get_bulk_prices(all_tickers)
 
-            save_portfolio_snapshot(total_value, total_investment, pnl, pnl_percent)
+            for uid, user_h in user_holdings.items():
+                total_value = 0
+                total_investment = 0
+                for h in user_h:
+                    price = prices.get(h['ticker'], h['buy_price'])
+                    total_value += h['quantity'] * price
+                    total_investment += h['quantity'] * h['buy_price']
+
+                pnl = total_value - total_investment
+                pnl_percent = (pnl / total_investment * 100) if total_investment > 0 else 0
+
+                save_portfolio_snapshot(uid, total_value, total_investment, pnl, pnl_percent)
         except Exception as e:
             logger.error(f"Portfolio snapshot error: {e}")
 
     # ─── Cooldown Helpers ─────────────────────────────────────
 
-    def _is_on_cooldown(self, ticker, alert_type):
-        """Return True if this alert type fired recently.
+    def _is_on_cooldown(self, ticker, alert_type, user_id=None):
+        """Return True if this alert type fired recently for this user+ticker combo.
 
+        When user_id is provided, the cooldown is scoped per-user so that one user's
+        alert does not block another user from receiving the same alert type.
         Checks the alerts DB table so cooldowns survive server restarts.
         """
         from portfolio_manager import get_db_connection
@@ -394,10 +406,19 @@ class MonitoringService:
         cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
         try:
             with get_db_connection() as conn:
-                row = conn.execute(
-                    'SELECT COUNT(*) AS cnt FROM alerts WHERE ticker = ? AND alert_type = ? AND created_at >= ?',
-                    (ticker, alert_type, cutoff)
-                ).fetchone()
+                if user_id and user_id != 'system':
+                    row = conn.execute(
+                        'SELECT COUNT(*) AS cnt FROM alerts '
+                        'WHERE ticker = ? AND alert_type = ? AND user_id = ? AND created_at >= ?',
+                        (ticker, alert_type, user_id, cutoff)
+                    ).fetchone()
+                else:
+                    # System-level fallback: check across all users for the ticker
+                    row = conn.execute(
+                        'SELECT COUNT(*) AS cnt FROM alerts '
+                        'WHERE ticker = ? AND alert_type = ? AND created_at >= ?',
+                        (ticker, alert_type, cutoff)
+                    ).fetchone()
                 return (row['cnt'] if row else 0) > 0
         except Exception:
             return False
@@ -424,7 +445,7 @@ class MonitoringService:
             parts.append(f"{news_label} news")
         return ' | '.join(parts) if parts else 'multiple indicators aligned'
 
-    def _run_brain_check(self, ticker):
+    def _run_brain_check(self, ticker, stock=None):
         """Run brain engine and alert on strong BUY/SELL signals or signal transitions."""
         try:
             result = _brain_fn(ticker, days=7)
@@ -444,7 +465,8 @@ class MonitoringService:
             if not (signal_changed or first_strong):
                 return
 
-            if self._is_on_cooldown(ticker, 'signal'):
+            brain_user_id = (stock or {}).get('user_id', 'system')
+            if self._is_on_cooldown(ticker, 'signal', user_id=brain_user_id):
                 return
 
             reasons = self._build_reason_string(result)
@@ -458,7 +480,8 @@ class MonitoringService:
             else:
                 return  # Signal changed but not strong enough to warrant alert
 
-            alert_id = create_alert(ticker, 'signal', alert_msg, severity, json.dumps({
+            user_id = (stock or {}).get('user_id', 'system')
+            alert_id = create_alert(user_id, ticker, 'signal', alert_msg, severity, json.dumps({
                 'score': score,
                 'signal': signal,
                 'prev_signal': prev_signal,

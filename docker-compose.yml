@@ -1,0 +1,136 @@
+services:
+  # ─── Redis ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: stockeye-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - stockeye-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ─── Backend Service ──────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockeye-backend
+    expose:
+      - "5000"        # internal only; nginx proxies externally
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./database:/app/database
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - stockeye-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ─── Frontend Service ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: stockeye-frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ssl/certs:/etc/nginx/ssl:ro    # TLS certs — see deployment guide below
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - stockeye-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # ─── Celery Worker (background monitoring) ───────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockeye-worker
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./database:/app/database
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - stockeye-network
+
+  # ─── Celery Beat (task scheduler) ────────────────────────────
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockeye-beat
+    command: celery -A tasks beat --loglevel=info --scheduler celery.beat.PersistentScheduler
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./database:/app/database
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - stockeye-network
+
+  # ─── MCP Server Service ───────────────────────────────────────
+  mcp-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mcp
+    container_name: stockeye-mcp
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./database:/app/database
+    restart: unless-stopped
+    networks:
+      - stockeye-network
+    stdin_open: true
+    tty: true
+    # Note: MCP server runs in STDIO mode for Claude Desktop
+
+# ─── Networks ─────────────────────────────────────────────────
+networks:
+  stockeye-network:
+    driver: bridge
+
+# ─── Volumes ──────────────────────────────────────────────────
+volumes:
+  database:
+    driver: local
+  redis_data:
+    driver: local

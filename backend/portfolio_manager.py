@@ -1,415 +1,336 @@
 """
-Portfolio Manager - SQLite database operations for portfolio management.
-Handles CRUD operations for holdings, monitored stocks, and alerts.
+Portfolio Manager - per-user database operations for portfolio management.
+All public functions require user_id as the first parameter.
 """
 
-import sqlite3
-import os
 import logging
 from datetime import datetime, timedelta
-from contextlib import contextmanager
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-DATABASE_PATH = os.path.join(os.path.dirname(__file__), '..', 'database', 'portfolio.db')
-
-
-def get_db_path():
-    """Get the absolute path to the database file."""
-    return os.path.abspath(DATABASE_PATH)
-
-
-@contextmanager
-def get_db_connection():
-    """Context manager for database connections."""
-    conn = sqlite3.connect(get_db_path())
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    try:
-        yield conn
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Database transaction failed: {e}")
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
 
 def init_database():
-    """Initialize the database with required tables."""
-    os.makedirs(os.path.dirname(get_db_path()), exist_ok=True)
-
+    """Initialize local-SQLite tables (skipped when using Supabase — run setup_db.py instead)."""
+    from db import DB_TYPE
+    if DB_TYPE == 'postgres':
+        logger.info("Supabase active — skipping local init_database(). Run setup_db.py to create tables.")
+        return
     with get_db_connection() as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS holdings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                name TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                buy_price REAL NOT NULL,
-                purchase_date TEXT NOT NULL,
-                sector TEXT DEFAULT '',
-                exchange TEXT DEFAULT 'NSE',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS monitored_stocks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL UNIQUE,
-                name TEXT DEFAULT '',
-                is_active BOOLEAN DEFAULT 1,
-                price_baseline REAL DEFAULT 0,
-                volume_avg_30d REAL DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                alert_type TEXT NOT NULL,
-                message TEXT NOT NULL,
-                severity TEXT NOT NULL DEFAULT 'info',
-                is_read BOOLEAN DEFAULT 0,
-                data TEXT DEFAULT '{}',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS price_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                target_price REAL NOT NULL,
-                direction TEXT NOT NULL DEFAULT 'above',
-                is_active BOOLEAN DEFAULT 1,
-                triggered BOOLEAN DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS portfolio_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                total_value REAL NOT NULL,
-                total_investment REAL NOT NULL,
-                pnl REAL NOT NULL,
-                pnl_percent REAL NOT NULL,
-                snapshot_date TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS chat_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
-    print("Database initialized successfully.")
+        conn.execute('''CREATE TABLE IF NOT EXISTS holdings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL, name TEXT NOT NULL, quantity REAL NOT NULL,
+            buy_price REAL NOT NULL, purchase_date TEXT NOT NULL,
+            sector TEXT DEFAULT '', exchange TEXT DEFAULT 'NSE',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS monitored_stocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL, name TEXT DEFAULT '', is_active BOOLEAN DEFAULT 1,
+            price_baseline REAL DEFAULT 0, volume_avg_30d REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, ticker))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL, alert_type TEXT NOT NULL, message TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'info', is_read BOOLEAN DEFAULT 0,
+            data TEXT DEFAULT '{}', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS price_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL, target_price REAL NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'above', is_active BOOLEAN DEFAULT 1,
+            triggered BOOLEAN DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+            total_value REAL NOT NULL, total_investment REAL NOT NULL,
+            pnl REAL NOT NULL, pnl_percent REAL NOT NULL, snapshot_date TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, snapshot_date))''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL DEFAULT 'local',
+            role TEXT NOT NULL, content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    logger.info("Local database initialized.")
 
 
-# ─── Holdings CRUD ──────────────────────────────────────────────
+# ─── Holdings ───────────────────────────────────────────────────
 
-def add_holding(ticker, name, quantity, buy_price, purchase_date, sector='', exchange='NSE'):
-    """Add a new stock holding to the portfolio."""
+def add_holding(user_id, ticker, name, quantity, buy_price, purchase_date, sector='', exchange='NSE'):
     with get_db_connection() as conn:
-        cursor = conn.execute('''
-            INSERT INTO holdings (ticker, name, quantity, buy_price, purchase_date, sector, exchange)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (ticker.upper(), name, quantity, buy_price, purchase_date, sector, exchange))
-        return cursor.lastrowid
+        cur = conn.execute('''
+            INSERT INTO holdings (user_id, ticker, name, quantity, buy_price, purchase_date, sector, exchange)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, ticker.upper(), name, quantity, buy_price, purchase_date, sector, exchange))
+        return cur.lastrowid
 
 
-def get_all_holdings():
-    """Fetch all holdings from the portfolio."""
+def get_all_holdings(user_id):
     with get_db_connection() as conn:
-        rows = conn.execute('SELECT * FROM holdings ORDER BY created_at DESC').fetchall()
-        return [dict(row) for row in rows]
+        rows = conn.execute(
+            'SELECT * FROM holdings WHERE user_id = ? ORDER BY created_at DESC', (user_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
-def get_holding_by_id(holding_id):
-    """Fetch a single holding by ID."""
+def get_holding_by_id(user_id, holding_id):
     with get_db_connection() as conn:
-        row = conn.execute('SELECT * FROM holdings WHERE id = ?', (holding_id,)).fetchone()
+        row = conn.execute(
+            'SELECT * FROM holdings WHERE id = ? AND user_id = ?', (holding_id, user_id)
+        ).fetchone()
         return dict(row) if row else None
 
 
-def update_holding(holding_id, data):
-    """Update a holding's information with strict field validation."""
-    # Strict whitelist of allowed fields - prevents SQL injection
-    ALLOWED_UPDATE_FIELDS = {'quantity', 'buy_price', 'purchase_date', 'sector', 'exchange', 'name'}
-
-    # Filter to only allowed fields
-    updates = {k: v for k, v in data.items() if k in ALLOWED_UPDATE_FIELDS}
-
+def update_holding(user_id, holding_id, data):
+    ALLOWED = {'quantity', 'buy_price', 'purchase_date', 'sector', 'exchange', 'name'}
+    updates = {k: v for k, v in data.items() if k in ALLOWED}
     if not updates:
         raise ValueError("No valid fields to update")
-
-    # Build safe SQL (field names are validated, values use parameters)
-    set_clause = ', '.join(f'{k} = ?' for k in updates.keys())
-    values = list(updates.values()) + [holding_id]
-
+    set_clause = ', '.join(f'{k} = ?' for k in updates)
+    values = list(updates.values()) + [holding_id, user_id]
     with get_db_connection() as conn:
-        try:
-            conn.execute(f'UPDATE holdings SET {set_clause} WHERE id = ?', values)
-            return True
-        except Exception as e:
-            raise Exception(f"Failed to update holding: {str(e)}")
-
-
-def delete_holding(holding_id):
-    """Remove a stock from the portfolio."""
-    with get_db_connection() as conn:
-        conn.execute('DELETE FROM holdings WHERE id = ?', (holding_id,))
+        conn.execute(f'UPDATE holdings SET {set_clause} WHERE id = ? AND user_id = ?', values)
         return True
 
 
-def calculate_portfolio_value(current_prices):
-    """
-    Calculate total portfolio value using current prices.
-    current_prices: dict of {ticker: current_price}
-    """
-    holdings = get_all_holdings()
-    total_value = 0
-    total_investment = 0
-    holdings_data = []
+def delete_holding(user_id, holding_id):
+    with get_db_connection() as conn:
+        conn.execute('DELETE FROM holdings WHERE id = ? AND user_id = ?', (holding_id, user_id))
+        return True
 
+
+def calculate_portfolio_value(user_id, current_prices):
+    holdings = get_all_holdings(user_id)
+    total_value = total_investment = 0
+    holdings_data = []
     for h in holdings:
         ticker = h['ticker']
         current_price = current_prices.get(ticker, h['buy_price'])
         investment = h['quantity'] * h['buy_price']
         current_val = h['quantity'] * current_price
         pnl = current_val - investment
-        pnl_percent = (pnl / investment * 100) if investment > 0 else 0
-
+        pnl_pct = (pnl / investment * 100) if investment > 0 else 0
         total_value += current_val
         total_investment += investment
-
-        holdings_data.append({
-            **h,
-            'current_price': current_price,
-            'investment': round(investment, 2),
-            'current_value': round(current_val, 2),
-            'pnl': round(pnl, 2),
-            'pnl_percent': round(pnl_percent, 2),
-            'portfolio_percent': 0  # calculated below
-        })
-
-    # Calculate portfolio percentage for each holding
+        holdings_data.append({**h, 'current_price': current_price,
+            'investment': round(investment, 2), 'current_value': round(current_val, 2),
+            'pnl': round(pnl, 2), 'pnl_percent': round(pnl_pct, 2), 'portfolio_percent': 0})
     for h in holdings_data:
         h['portfolio_percent'] = round((h['current_value'] / total_value * 100) if total_value > 0 else 0, 2)
-
     total_pnl = total_value - total_investment
-    total_pnl_percent = (total_pnl / total_investment * 100) if total_investment > 0 else 0
-
-    return {
-        'holdings': holdings_data,
-        'total_value': round(total_value, 2),
-        'total_investment': round(total_investment, 2),
-        'total_pnl': round(total_pnl, 2),
-        'total_pnl_percent': round(total_pnl_percent, 2),
-        'num_holdings': len(holdings_data)
-    }
+    return {'holdings': holdings_data, 'total_value': round(total_value, 2),
+            'total_investment': round(total_investment, 2), 'total_pnl': round(total_pnl, 2),
+            'total_pnl_percent': round((total_pnl / total_investment * 100) if total_investment > 0 else 0, 2),
+            'num_holdings': len(holdings_data)}
 
 
-def get_portfolio_stats(current_prices):
-    """Calculate comprehensive portfolio statistics."""
-    portfolio = calculate_portfolio_value(current_prices)
+def get_portfolio_stats(user_id, current_prices):
+    portfolio = calculate_portfolio_value(user_id, current_prices)
     holdings = portfolio['holdings']
-
     if not holdings:
         return {**portfolio, 'best_performer': None, 'worst_performer': None, 'sectors': {}}
-
-    best = max(holdings, key=lambda x: x['pnl_percent'])
+    best  = max(holdings, key=lambda x: x['pnl_percent'])
     worst = min(holdings, key=lambda x: x['pnl_percent'])
-
-    # Sector allocation
     sectors = {}
     for h in holdings:
-        sector = h.get('sector', 'Unknown') or 'Unknown'
-        sectors[sector] = sectors.get(sector, 0) + h['current_value']
-
-    return {
-        **portfolio,
-        'best_performer': {'ticker': best['ticker'], 'name': best['name'], 'pnl_percent': best['pnl_percent']},
-        'worst_performer': {'ticker': worst['ticker'], 'name': worst['name'], 'pnl_percent': worst['pnl_percent']},
-        'sectors': sectors
-    }
+        s = h.get('sector') or 'Unknown'
+        sectors[s] = sectors.get(s, 0) + h['current_value']
+    return {**portfolio,
+            'best_performer':  {'ticker': best['ticker'],  'name': best['name'],  'pnl_percent': best['pnl_percent']},
+            'worst_performer': {'ticker': worst['ticker'], 'name': worst['name'], 'pnl_percent': worst['pnl_percent']},
+            'sectors': sectors}
 
 
-# ─── Monitored Stocks ──────────────────────────────────────────
+# ─── Monitored Stocks ───────────────────────────────────────────
 
-def start_monitoring(ticker, name='', price_baseline=0, volume_avg=0):
-    """Add a stock to the monitoring list."""
+def start_monitoring(user_id, ticker, name='', price_baseline=0, volume_avg=0):
     with get_db_connection() as conn:
         conn.execute('''
-            INSERT OR REPLACE INTO monitored_stocks (ticker, name, is_active, price_baseline, volume_avg_30d)
-            VALUES (?, ?, 1, ?, ?)
-        ''', (ticker.upper(), name, price_baseline, volume_avg))
+            INSERT OR REPLACE INTO monitored_stocks
+            (user_id, ticker, name, is_active, price_baseline, volume_avg_30d)
+            VALUES (?, ?, ?, TRUE, ?, ?)
+        ''', (user_id, ticker.upper(), name, price_baseline, volume_avg))
         return True
 
 
-def stop_monitoring(ticker):
-    """Deactivate monitoring for a stock."""
+def stop_monitoring(user_id, ticker):
     with get_db_connection() as conn:
-        conn.execute('UPDATE monitored_stocks SET is_active = 0 WHERE ticker = ?', (ticker.upper(),))
+        conn.execute('UPDATE monitored_stocks SET is_active = FALSE WHERE ticker = ? AND user_id = ?',
+                     (ticker.upper(), user_id))
         return True
 
 
-def sync_portfolio_to_monitors():
-    """Sync all portfolio holdings to monitored_stocks. Called at startup."""
-    holdings = get_all_holdings()
-    synced = 0
+def sync_portfolio_to_monitors(user_id):
+    holdings = get_all_holdings(user_id)
     for h in holdings:
-        start_monitoring(h['ticker'], h.get('name', h['ticker']))
-        synced += 1
-    if synced:
-        logger.info(f"Auto-synced {synced} portfolio holdings to monitoring")
-    return synced
+        start_monitoring(user_id, h['ticker'], h.get('name', h['ticker']))
+    return len(holdings)
 
 
-def get_monitored_stocks(active_only=True):
-    """Fetch all monitored stocks."""
+def get_monitored_stocks(user_id, active_only=True):
     with get_db_connection() as conn:
         if active_only:
-            rows = conn.execute('SELECT * FROM monitored_stocks WHERE is_active = 1').fetchall()
+            rows = conn.execute(
+                'SELECT * FROM monitored_stocks WHERE user_id = ? AND is_active = TRUE', (user_id,)
+            ).fetchall()
         else:
-            rows = conn.execute('SELECT * FROM monitored_stocks').fetchall()
-        return [dict(row) for row in rows]
+            rows = conn.execute(
+                'SELECT * FROM monitored_stocks WHERE user_id = ?', (user_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
 
-def update_monitor_baseline(ticker, price, volume_avg):
-    """Update baseline values for a monitored stock."""
+def update_monitor_baseline(user_id, ticker, price, volume_avg):
     with get_db_connection() as conn:
         conn.execute('''
-            UPDATE monitored_stocks SET price_baseline = ?, volume_avg_30d = ? WHERE ticker = ?
-        ''', (price, volume_avg, ticker.upper()))
+            UPDATE monitored_stocks SET price_baseline = ?, volume_avg_30d = ?
+            WHERE ticker = ? AND user_id = ?
+        ''', (price, volume_avg, ticker.upper(), user_id))
 
 
 # ─── Alerts ─────────────────────────────────────────────────────
 
-def create_alert(ticker, alert_type, message, severity='info', data='{}'):
-    """Create a new alert."""
+def create_alert(user_id, ticker, alert_type, message, severity='info', data='{}'):
     with get_db_connection() as conn:
-        cursor = conn.execute('''
-            INSERT INTO alerts (ticker, alert_type, message, severity, data)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (ticker.upper(), alert_type, message, severity, data))
-        return cursor.lastrowid
+        cur = conn.execute('''
+            INSERT INTO alerts (user_id, ticker, alert_type, message, severity, data)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, ticker.upper(), alert_type, message, severity, data))
+        return cur.lastrowid
 
 
-def get_recent_alerts(hours=24, limit=50):
-    """Fetch recent alerts."""
+def get_recent_alerts(user_id, hours=24, limit=50):
     cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
     with get_db_connection() as conn:
         rows = conn.execute('''
-            SELECT * FROM alerts WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?
-        ''', (cutoff, limit)).fetchall()
-        return [dict(row) for row in rows]
+            SELECT * FROM alerts WHERE user_id = ? AND created_at >= ?
+            ORDER BY created_at DESC LIMIT ?
+        ''', (user_id, cutoff, limit)).fetchall()
+        return [dict(r) for r in rows]
 
 
-def get_alerts_for_ticker(ticker, limit=20):
-    """Fetch alerts for a specific stock."""
+def get_alerts_for_ticker(user_id, ticker, limit=20):
     with get_db_connection() as conn:
         rows = conn.execute('''
-            SELECT * FROM alerts WHERE ticker = ? ORDER BY created_at DESC LIMIT ?
-        ''', (ticker.upper(), limit)).fetchall()
-        return [dict(row) for row in rows]
+            SELECT * FROM alerts WHERE user_id = ? AND ticker = ?
+            ORDER BY created_at DESC LIMIT ?
+        ''', (user_id, ticker.upper(), limit)).fetchall()
+        return [dict(r) for r in rows]
 
 
-def mark_alert_read(alert_id):
-    """Mark an alert as read."""
+def mark_alert_read(user_id, alert_id):
     with get_db_connection() as conn:
-        conn.execute('UPDATE alerts SET is_read = 1 WHERE id = ?', (alert_id,))
+        conn.execute('UPDATE alerts SET is_read = TRUE WHERE id = ? AND user_id = ?', (alert_id, user_id))
 
 
-def clear_old_alerts(days=7):
-    """Clear alerts older than specified days."""
+def clear_old_alerts(user_id, days=7):
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     with get_db_connection() as conn:
-        conn.execute('DELETE FROM alerts WHERE created_at < ?', (cutoff,))
+        conn.execute('DELETE FROM alerts WHERE user_id = ? AND created_at < ?', (user_id, cutoff))
 
 
 # ─── Price Alerts ───────────────────────────────────────────────
 
-def add_price_alert(ticker, target_price, direction='above'):
-    """Set a custom price alert."""
+def add_price_alert(user_id, ticker, target_price, direction='above'):
     with get_db_connection() as conn:
-        cursor = conn.execute('''
-            INSERT INTO price_alerts (ticker, target_price, direction)
-            VALUES (?, ?, ?)
-        ''', (ticker.upper(), target_price, direction))
-        return cursor.lastrowid
+        cur = conn.execute('''
+            INSERT INTO price_alerts (user_id, ticker, target_price, direction)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, ticker.upper(), target_price, direction))
+        return cur.lastrowid
 
 
-def get_active_price_alerts():
-    """Fetch all active price alerts."""
+def get_active_price_alerts(user_id):
     with get_db_connection() as conn:
         rows = conn.execute('''
-            SELECT * FROM price_alerts WHERE is_active = 1 AND triggered = 0
-        ''').fetchall()
-        return [dict(row) for row in rows]
+            SELECT * FROM price_alerts WHERE user_id = ? AND is_active = TRUE AND triggered = FALSE
+        ''', (user_id,)).fetchall()
+        return [dict(r) for r in rows]
 
 
-def trigger_price_alert(alert_id):
-    """Mark a price alert as triggered."""
+def trigger_price_alert(user_id, alert_id):
     with get_db_connection() as conn:
-        conn.execute('UPDATE price_alerts SET triggered = 1 WHERE id = ?', (alert_id,))
+        conn.execute('UPDATE price_alerts SET triggered = TRUE WHERE id = ? AND user_id = ?', (alert_id, user_id))
 
 
 # ─── Portfolio Snapshots ────────────────────────────────────────
 
-def save_portfolio_snapshot(total_value, total_investment, pnl, pnl_percent):
-    """Save a daily portfolio snapshot."""
+def save_portfolio_snapshot(user_id, total_value, total_investment, pnl, pnl_percent):
     today = datetime.now().strftime('%Y-%m-%d')
     with get_db_connection() as conn:
         conn.execute('''
-            INSERT OR REPLACE INTO portfolio_snapshots (total_value, total_investment, pnl, pnl_percent, snapshot_date)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (total_value, total_investment, pnl, pnl_percent, today))
+            INSERT OR REPLACE INTO portfolio_snapshots
+            (user_id, total_value, total_investment, pnl, pnl_percent, snapshot_date)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, total_value, total_investment, pnl, pnl_percent, today))
 
 
-def get_portfolio_history(days=30):
-    """Get portfolio value history."""
+def get_portfolio_history(user_id, days=30):
     cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
     with get_db_connection() as conn:
         rows = conn.execute('''
-            SELECT * FROM portfolio_snapshots WHERE snapshot_date >= ? ORDER BY snapshot_date ASC
-        ''', (cutoff,)).fetchall()
-        return [dict(row) for row in rows]
+            SELECT * FROM portfolio_snapshots WHERE user_id = ? AND snapshot_date >= ?
+            ORDER BY snapshot_date ASC
+        ''', (user_id, cutoff)).fetchall()
+        return [dict(r) for r in rows]
 
 
-# ─── Chat History ───────────────────────────────────────────────
+# ─── Chat History (legacy — prefer conversation_manager) ────────
 
-def save_chat_message(role, content):
-    """Save a chat message."""
+def save_chat_message(user_id, role, content):
     with get_db_connection() as conn:
-        conn.execute('INSERT INTO chat_history (role, content) VALUES (?, ?)', (role, content))
+        conn.execute('INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)',
+                     (user_id, role, content))
 
 
-def get_chat_history(limit=20):
-    """Get recent chat history."""
+def get_chat_history(user_id, limit=20):
     with get_db_connection() as conn:
         rows = conn.execute('''
-            SELECT * FROM chat_history ORDER BY created_at DESC LIMIT ?
-        ''', (limit,)).fetchall()
-        return [dict(row) for row in reversed(rows)]
+            SELECT * FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+        ''', (user_id, limit)).fetchall()
+        return [dict(r) for r in reversed(rows)]
 
 
-def clear_chat_history():
-    """Clear all chat history."""
+def clear_chat_history(user_id):
     with get_db_connection() as conn:
-        conn.execute('DELETE FROM chat_history')
+        conn.execute('DELETE FROM chat_history WHERE user_id = ?', (user_id,))
 
 
-# Initialize database on import
+# ─── Global (cross-user) helpers for background monitoring service ───
+
+def get_all_monitored_stocks_global(active_only=True):
+    """Get monitored stocks across ALL users (for background monitor service)."""
+    with get_db_connection() as conn:
+        if active_only:
+            rows = conn.execute(
+                'SELECT * FROM monitored_stocks WHERE is_active = TRUE'
+            ).fetchall()
+        else:
+            rows = conn.execute('SELECT * FROM monitored_stocks').fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_active_price_alerts_global():
+    """Get active price alerts across ALL users (for background monitor service)."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            'SELECT * FROM price_alerts WHERE is_active = TRUE AND triggered = FALSE'
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_holdings_global():
+    """Get holdings across ALL users (for portfolio snapshot service)."""
+    with get_db_connection() as conn:
+        rows = conn.execute('SELECT * FROM holdings ORDER BY user_id').fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_monitor_baseline_global(ticker, price, volume_avg):
+    """Update baseline for a ticker across ALL users who monitor it."""
+    with get_db_connection() as conn:
+        conn.execute('''
+            UPDATE monitored_stocks SET price_baseline = ?, volume_avg_30d = ?
+            WHERE ticker = ? AND is_active = TRUE
+        ''', (price, volume_avg, ticker.upper()))
+
+
+# Initialize local DB on import (no-op for Supabase)
 init_database()
+

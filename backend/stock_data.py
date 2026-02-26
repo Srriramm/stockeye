@@ -15,6 +15,17 @@ from functools import lru_cache
 import time
 import json
 
+try:
+    from cache import (
+        get_cached_price, cache_price,
+        get_cached_technicals, cache_technicals,
+        get_cached_indices, cache_indices,
+        get_cached_bulk_prices, cache_bulk_prices,
+    )
+    _redis_cache_available = True
+except ImportError:
+    _redis_cache_available = False
+
 logger = logging.getLogger(__name__)
 
 # ─── Cache Layer ────────────────────────────────────────────────
@@ -112,9 +123,16 @@ def format_ticker(ticker, exchange='NSE'):
 def get_stock_price(ticker):
     """Get real-time stock price and basic info."""
     cache_key = f"price_{ticker}"
+    # L1: in-process dict (sub-millisecond, same process)
     cached = _get_cached(cache_key)
     if cached:
         return cached
+    # L2: Redis (shared across worker processes, 30s TTL)
+    if _redis_cache_available:
+        redis_hit = get_cached_price(ticker)
+        if redis_hit:
+            _set_cached(cache_key, redis_hit)   # warm L1
+            return redis_hit
 
     try:
         yf_ticker = format_ticker(ticker)
@@ -160,6 +178,8 @@ def get_stock_price(ticker):
         }
 
         _set_cached(cache_key, result)
+        if _redis_cache_available:
+            cache_price(ticker, result, ttl=30)
         return result
 
     except Exception as e:
@@ -263,6 +283,18 @@ def get_historical_data(ticker, period='1y', interval='1d'):
 
 def calculate_technical_indicators(ticker, period='6mo'):
     """Calculate RSI, MACD, Bollinger Bands, Moving Averages."""
+    # In-process L1 cache (keyed by period so 3mo and 6mo don't collide)
+    cache_key = f"tech_{ticker}_{period}"
+    cached = _get_cached(cache_key)
+    if cached:
+        return cached
+    # Redis L2 cache (300s TTL — technicals don't change second-to-second)
+    if _redis_cache_available:
+        redis_hit = get_cached_technicals(ticker)
+        if redis_hit:
+            _set_cached(cache_key, redis_hit)
+            return redis_hit
+
     try:
         yf_ticker = format_ticker(ticker)
         stock = yf.Ticker(yf_ticker)
@@ -360,6 +392,9 @@ def calculate_technical_indicators(ticker, period='6mo'):
             'signals': signals,
         }
 
+        _set_cached(cache_key, result)
+        if _redis_cache_available:
+            cache_technicals(ticker, result, ttl=300)
         return result
 
     except Exception as e:
@@ -375,6 +410,11 @@ def get_market_indices():
     cached = _get_cached(cache_key)
     if cached:
         return cached
+    if _redis_cache_available:
+        redis_hit = get_cached_indices()
+        if redis_hit:
+            _set_cached(cache_key, redis_hit)
+            return redis_hit
 
     results = {}
     for name, symbol in INDICES.items():
@@ -396,6 +436,8 @@ def get_market_indices():
             results[name] = {'value': 0, 'change': 0, 'change_percent': 0}
 
     _set_cached(cache_key, results)
+    if _redis_cache_available:
+        cache_indices(results, ttl=60)
     return results
 
 
@@ -506,6 +548,11 @@ def get_stocks_by_sector(sector):
 
 def get_bulk_prices(tickers):
     """Fetch current prices for multiple tickers at once."""
+    if _redis_cache_available and tickers:
+        redis_hit = get_cached_bulk_prices(tickers)
+        if redis_hit:
+            return redis_hit
+
     prices = {}
     for ticker in tickers:
         try:
@@ -515,6 +562,9 @@ def get_bulk_prices(tickers):
         except Exception as e:
             logger.debug(f"Failed to fetch price for {ticker}: {e}")
             continue
+
+    if _redis_cache_available and prices:
+        cache_bulk_prices(tickers, prices, ttl=30)
     return prices
 
 

@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
@@ -91,19 +91,7 @@ Your tone: Professional, warm, knowledgeable — like a trusted wealth manager w
 
 # ─── Conversation History ───────────────────────────────────────
 
-conversation_history = []
 MAX_HISTORY = 20
-
-
-def clear_conversation():
-    """Reset conversation history."""
-    global conversation_history
-    conversation_history = []
-
-
-def get_conversation_history():
-    """Get current conversation history."""
-    return conversation_history
 
 
 # ─── Query Classification ──────────────────────────────────────
@@ -189,14 +177,16 @@ def _prepare_market_context(stock_data=None, news_data=None, portfolio_data=None
 
 # ─── Main AI Chat Function ─────────────────────────────────────
 
-def get_stock_advice(user_query, market_context=None, stock_data=None, news_data=None, portfolio_data=None, technicals=None):
+def get_stock_advice(user_query, market_context=None, stock_data=None, news_data=None,
+                     portfolio_data=None, technicals=None, conversation_history=None):
     """
     Get AI-powered stock advice based on user query and market data.
 
     Returns:
         dict with 'response' (AI message), 'data_used' (context info), and 'error' if any
     """
-    global conversation_history
+    if conversation_history is None:
+        conversation_history = []
 
     if not openai_client:
         return {
@@ -222,9 +212,9 @@ Please provide your analysis and advice based on the above real-time data."""
     # Build messages for API
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Add conversation history for context
+    # Add per-user conversation history for context
     for msg in conversation_history[-MAX_HISTORY:]:
-        messages.append(msg)
+        messages.append({"role": msg["role"], "content": msg["content"]})
 
     messages.append({"role": "user", "content": user_message})
 
@@ -239,14 +229,6 @@ Please provide your analysis and advice based on the above real-time data."""
         )
 
         ai_response = response.choices[0].message.content
-
-        # Update conversation history
-        conversation_history.append({"role": "user", "content": user_query})
-        conversation_history.append({"role": "assistant", "content": ai_response})
-
-        # Trim history if too long
-        if len(conversation_history) > MAX_HISTORY * 2:
-            conversation_history = conversation_history[-MAX_HISTORY:]
 
         return {
             'response': ai_response,
@@ -267,13 +249,15 @@ Please provide your analysis and advice based on the above real-time data."""
         }
 
 
-def get_stock_advice_dual(user_query, provider='auto', **context):
+def get_stock_advice_dual(user_query, provider='auto', conversation_history=None, **context):
     """
     Get AI-powered stock advice with dual provider support (OpenAI + Anthropic).
 
     Args:
         user_query: User's question
         provider: 'auto', 'openai', or 'anthropic'
+        conversation_history: List of prior {role, content} messages for this user's session.
+                              Never pass a global list — always load per-user history from DB.
         **context: stock_data, news_data, portfolio_data, technicals
 
     Returns:
@@ -285,7 +269,8 @@ def get_stock_advice_dual(user_query, provider='auto', **context):
             'error': str | None
         }
     """
-    global conversation_history
+    if conversation_history is None:
+        conversation_history = []
 
     # Determine provider
     query_type = classify_query(user_query)
@@ -303,9 +288,9 @@ def get_stock_advice_dual(user_query, provider='auto', **context):
 
     # Route to appropriate provider
     if provider == 'anthropic' and anthropic_client:
-        return _query_anthropic(user_query, query_type, **context)
+        return _query_anthropic(user_query, query_type, conversation_history=conversation_history, **context)
     elif provider == 'openai' and openai_client:
-        return _query_openai(user_query, query_type, **context)
+        return _query_openai(user_query, query_type, conversation_history=conversation_history, **context)
     else:
         return {
             'response': _get_fallback_response(user_query),
@@ -316,9 +301,10 @@ def get_stock_advice_dual(user_query, provider='auto', **context):
         }
 
 
-def _query_openai(user_query, query_type, **context):
-    """Query OpenAI GPT-4."""
-    global conversation_history  # Fix UnboundLocalError
+def _query_openai(user_query, query_type, conversation_history=None, **context):
+    """Query OpenAI GPT-4 using per-user conversation history loaded from DB."""
+    if conversation_history is None:
+        conversation_history = []
 
     # Prepare context
     context_str = _prepare_market_context(
@@ -339,12 +325,11 @@ def _query_openai(user_query, query_type, **context):
 
 Please provide your analysis and advice based on the above real-time data."""
 
-    # Build messages for API
+    # Build messages for API using per-user history (no global state)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Add conversation history
     for msg in conversation_history[-MAX_HISTORY:]:
-        messages.append(msg)
+        messages.append({"role": msg["role"], "content": msg["content"]})
 
     messages.append({"role": "user", "content": user_message})
 
@@ -359,14 +344,6 @@ Please provide your analysis and advice based on the above real-time data."""
         )
 
         ai_response = response.choices[0].message.content
-
-        # Update conversation history
-        conversation_history.append({"role": "user", "content": user_query})
-        conversation_history.append({"role": "assistant", "content": ai_response})
-
-        # Trim history if too long
-        if len(conversation_history) > MAX_HISTORY * 2:
-            conversation_history = conversation_history[-MAX_HISTORY:]
 
         return {
             'response': ai_response,
@@ -389,9 +366,10 @@ Please provide your analysis and advice based on the above real-time data."""
         }
 
 
-def _query_anthropic(user_query, query_type, **context):
-    """Query Anthropic Claude."""
-    global conversation_history  # Fix UnboundLocalError
+def _query_anthropic(user_query, query_type, conversation_history=None, **context):
+    """Query Anthropic Claude using per-user conversation history loaded from DB."""
+    if conversation_history is None:
+        conversation_history = []
 
     # Model selection based on query complexity
     model = "claude-opus-4-6" if query_type == 'deep' else "claude-sonnet-4-5-20250929"
@@ -405,10 +383,9 @@ def _query_anthropic(user_query, query_type, **context):
         context.get('technicals')
     )
 
-    # Build messages
+    # Build messages using per-user history (no global state)
     messages = []
 
-    # Add conversation history (Claude format)
     for msg in conversation_history[-MAX_HISTORY:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
 
@@ -436,14 +413,6 @@ Please provide your analysis and advice based on the above real-time data."""
 
         ai_response = response.content[0].text
 
-        # Update conversation history
-        conversation_history.append({"role": "user", "content": user_query})
-        conversation_history.append({"role": "assistant", "content": ai_response})
-
-        # Trim history if too long
-        if len(conversation_history) > MAX_HISTORY * 2:
-            conversation_history = conversation_history[-MAX_HISTORY:]
-
         return {
             'response': ai_response,
             'provider_used': 'anthropic',
@@ -455,7 +424,7 @@ Please provide your analysis and advice based on the above real-time data."""
 
     except Exception as e:
         error_msg = str(e)
-        print(f"Anthropic API error: {error_msg}")
+        logger.error(f"Anthropic API error: {error_msg}", exc_info=True)
         return {
             'response': _get_fallback_response(user_query),
             'provider_used': 'anthropic',

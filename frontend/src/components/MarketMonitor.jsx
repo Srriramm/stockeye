@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Activity, Eye, EyeOff, Bell, Search, RefreshCw, Trash2, ArrowUpRight, ArrowDownRight, Target, TrendingUp, X } from 'lucide-react';
+import { Activity, Eye, Bell, Search, RefreshCw, Trash2, ArrowUpRight, ArrowDownRight, Target, TrendingUp, X, Newspaper, ChevronDown, ChevronUp } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer } from 'recharts';
 import axios from 'axios';
+import { authAxios } from '../utils/api';
 import { toast } from 'react-toastify';
 
 export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) {
@@ -14,23 +15,41 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
   const [priceAlertForm, setPriceAlertForm] = useState({ ticker: '', target_price: '', direction: 'above' });
   const [news, setNews] = useState([]);
   const [stockHistories, setStockHistories] = useState({});
+  const [stockSignals, setStockSignals] = useState({});   // { TICKER: { signal, score, rsi, ... } }
+  const [stockNews, setStockNews] = useState({});          // { TICKER: [articles] }
+  const [expandedStock, setExpandedStock] = useState(null); // ticker whose news panel is open
+  const [newsLoading, setNewsLoading] = useState({});       // { TICKER: bool }
 
   const fetchMonitoredStocks = useCallback(async () => {
     try {
       const [stocksRes, alertsRes, newsRes] = await Promise.allSettled([
-        axios.get(`${apiUrl}/api/monitor/stocks`),
-        axios.get(`${apiUrl}/api/alerts?hours=24&limit=50`),
+        authAxios.get(`${apiUrl}/api/monitor/stocks`),
+        authAxios.get(`${apiUrl}/api/alerts?hours=24&limit=50`),
         axios.get(`${apiUrl}/api/news/market`),
       ]);
       if (stocksRes.status === 'fulfilled') {
         const stocks = stocksRes.value.data.stocks || [];
         setMonitoredStocks(stocks);
+
+        // Fetch chart histories (first 10 stocks)
         for (const stock of stocks.slice(0, 10)) {
           try {
             const histRes = await axios.get(`${apiUrl}/api/stocks/${stock.ticker}/history?period=5d&interval=1h`);
             setStockHistories(prev => ({ ...prev, [stock.ticker]: histRes.data.data || [] }));
           } catch { }
         }
+
+        // Fetch quick signals in parallel for all monitored stocks
+        const signalResults = await Promise.allSettled(
+          stocks.map(s => axios.get(`${apiUrl}/api/stocks/${s.ticker}/quick-signal`))
+        );
+        const signals = {};
+        signalResults.forEach((res, i) => {
+          if (res.status === 'fulfilled') {
+            signals[stocks[i].ticker] = res.value.data;
+          }
+        });
+        setStockSignals(prev => ({ ...prev, ...signals }));
       }
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value.data.alerts || []);
       if (newsRes.status === 'fulfilled') setNews(newsRes.value.data.news || []);
@@ -62,7 +81,7 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
 
   const startMonitoring = async (ticker) => {
     try {
-      await axios.post(`${apiUrl}/api/monitor/start`, { ticker });
+      await authAxios.post(`${apiUrl}/api/monitor/start`, { ticker });
       setAddTicker(''); setSearchResults([]);
       toast.success(`Started monitoring ${ticker}`);
       fetchMonitoredStocks();
@@ -71,10 +90,29 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
 
   const stopMonitoring = async (ticker) => {
     try {
-      await axios.post(`${apiUrl}/api/monitor/stop`, { ticker });
+      await authAxios.post(`${apiUrl}/api/monitor/stop`, { ticker });
+      if (expandedStock === ticker) setExpandedStock(null);
       toast.success(`Stopped monitoring ${ticker}`);
       fetchMonitoredStocks();
     } catch { toast.error('Failed to stop monitoring'); }
+  };
+
+  const toggleStockNews = async (ticker) => {
+    if (expandedStock === ticker) {
+      setExpandedStock(null);
+      return;
+    }
+    setExpandedStock(ticker);
+    if (stockNews[ticker]) return; // already fetched
+    setNewsLoading(prev => ({ ...prev, [ticker]: true }));
+    try {
+      const res = await axios.get(`${apiUrl}/api/news/${ticker}`);
+      setStockNews(prev => ({ ...prev, [ticker]: res.data?.news || [] }));
+    } catch {
+      setStockNews(prev => ({ ...prev, [ticker]: [] }));
+    } finally {
+      setNewsLoading(prev => ({ ...prev, [ticker]: false }));
+    }
   };
 
   const addPriceAlert = async (e) => {
@@ -84,7 +122,7 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
     const targetPrice = parseFloat(priceAlertForm.target_price);
     if (isNaN(targetPrice) || targetPrice <= 0) { toast.error('Target price must be positive'); return; }
     try {
-      await axios.post(`${apiUrl}/api/alerts/price`, { ticker: priceAlertForm.ticker, target_price: targetPrice, direction: priceAlertForm.direction });
+      await authAxios.post(`${apiUrl}/api/alerts/price`, { ticker: priceAlertForm.ticker, target_price: targetPrice, direction: priceAlertForm.direction });
       setShowAddPriceAlert(false);
       setPriceAlertForm({ ticker: '', target_price: '', direction: 'above' });
       toast.success('Price alert set!');
@@ -95,6 +133,12 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
     if (severity === 'critical') return { bg: '#fff1f2', text: '#991b1b', border: '#fecdd3', dotColor: '#ef4444' };
     if (severity === 'warning') return { bg: '#fffbeb', text: '#92400e', border: '#fde68a', dotColor: '#f59e0b' };
     return { bg: '#eff6ff', text: '#1e40af', border: '#bfdbfe', dotColor: '#2563eb' };
+  };
+
+  const signalStyle = (signal) => {
+    if (signal === 'BUY') return { bg: '#f0fdf4', text: '#15803d', border: '#bbf7d0' };
+    if (signal === 'SELL') return { bg: '#fff1f2', text: '#991b1b', border: '#fecdd3' };
+    return { bg: '#f8fafc', text: '#475569', border: '#e2e8f0' };
   };
 
   const inputStyle = { background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '10px 14px', fontSize: 14, width: '100%' };
@@ -176,58 +220,154 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
               <p className="text-xs" style={{ color: '#94a3b8' }}>Search above to start monitoring</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {monitoredStocks.map((stock) => (
-                <div key={stock.ticker} className="rounded-xl p-5 transition-all" style={{ background: '#ffffff', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}
-                  onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
-                  onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.06)'; e.currentTarget.style.transform = ''; }}>
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: stock.change_percent >= 0 ? '#f0fdf4' : '#fff1f2' }}>
-                        <Activity size={16} style={{ color: stock.change_percent >= 0 ? '#059669' : '#dc2626' }} />
+            <div className="space-y-4">
+              {monitoredStocks.map((stock) => {
+                const sig = stockSignals[stock.ticker];
+                const ss = signalStyle(sig?.signal);
+                const isExpanded = expandedStock === stock.ticker;
+                const articles = stockNews[stock.ticker] || [];
+                const loadingNews = newsLoading[stock.ticker];
+
+                return (
+                  <div key={stock.ticker} className="rounded-xl overflow-hidden transition-all" style={{ background: '#ffffff', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+                    {/* Stock card row */}
+                    <div className="p-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: stock.change_percent >= 0 ? '#f0fdf4' : '#fff1f2' }}>
+                            <Activity size={16} style={{ color: stock.change_percent >= 0 ? '#059669' : '#dc2626' }} />
+                          </div>
+                          <div>
+                            <div className="font-bold text-sm" style={{ color: '#0f172a' }}>{stock.ticker}</div>
+                            <div className="text-xs" style={{ color: '#94a3b8' }}>{stock.name?.substring(0, 24)}</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {/* Signal badge */}
+                          {sig && (
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold" style={{ background: ss.bg, color: ss.text, border: `1px solid ${ss.border}` }}>
+                              {sig.signal}
+                            </span>
+                          )}
+                          <button onClick={() => stopMonitoring(stock.ticker)} className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-all" title="Remove from monitor"
+                            style={{ background: '#fff1f2', color: '#dc2626', border: '1px solid #fecdd3' }}
+                            onMouseEnter={e => { e.currentTarget.style.background = '#fee2e2'; e.currentTarget.style.borderColor = '#fca5a5'; }}
+                            onMouseLeave={e => { e.currentTarget.style.background = '#fff1f2'; e.currentTarget.style.borderColor = '#fecdd3'; }}>
+                            <Trash2 size={11} /> Remove
+                          </button>
+                        </div>
                       </div>
-                      <div>
-                        <div className="font-bold text-sm" style={{ color: '#0f172a' }}>{stock.ticker}</div>
-                        <div className="text-xs" style={{ color: '#94a3b8' }}>{stock.name?.substring(0, 20)}</div>
+
+                      <div className="flex items-end justify-between mb-3">
+                        <div>
+                          <div className="text-xl font-bold font-mono-nums" style={{ color: '#0f172a' }}>₹{stock.current_price?.toLocaleString('en-IN')}</div>
+                          <div className="flex items-center gap-1 text-xs font-bold mt-0.5" style={{ color: stock.change_percent >= 0 ? '#059669' : '#dc2626' }}>
+                            {stock.change_percent >= 0 ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
+                            {stock.change_percent >= 0 ? '+' : ''}{stock.change_percent?.toFixed(2)}%
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          {sig && (
+                            <div className="text-[10px] font-mono" style={{ color: '#94a3b8' }}>
+                              RSI {sig.rsi} · Score {sig.score}
+                            </div>
+                          )}
+                          <div className="text-[10px] mt-0.5" style={{ color: '#94a3b8' }}>Base: ₹{stock.price_baseline?.toLocaleString('en-IN')}</div>
+                        </div>
+                      </div>
+
+                      {stockHistories[stock.ticker]?.length > 0 && (
+                        <ResponsiveContainer width="100%" height={48}>
+                          <LineChart data={stockHistories[stock.ticker].slice(-48)}>
+                            <Line type="monotone" dataKey="close" dot={false} stroke={stock.change_percent >= 0 ? '#059669' : '#dc2626'} strokeWidth={1.5} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      )}
+
+                      <div className="flex items-center justify-between mt-3">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{
+                            background: stock.change_percent >= 0 ? '#f0fdf4' : '#fff1f2',
+                            color: stock.change_percent >= 0 ? '#059669' : '#dc2626',
+                          }}>
+                            {stock.change_percent >= 0 ? '▲ Bullish' : '▼ Bearish'}
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{ background: '#eff6ff', color: '#1e40af' }}>
+                            Monitoring
+                          </span>
+                          {sig && (
+                            <span className="text-[10px]" style={{ color: '#94a3b8' }}>
+                              {sig.positive_news}↑ {sig.negative_news}↓ news
+                            </span>
+                          )}
+                        </div>
+                        {/* Toggle news button */}
+                        <button
+                          onClick={() => toggleStockNews(stock.ticker)}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all"
+                          style={{ background: isExpanded ? '#eff6ff' : '#f8fafc', color: isExpanded ? '#1d4ed8' : '#64748b', border: `1px solid ${isExpanded ? '#bfdbfe' : '#e2e8f0'}` }}
+                        >
+                          <Newspaper size={11} />
+                          News
+                          {isExpanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                        </button>
                       </div>
                     </div>
-                    <button onClick={() => stopMonitoring(stock.ticker)} className="p-1.5 rounded-lg transition-all" title="Stop monitoring"
-                      style={{ color: '#94a3b8' }}
-                      onMouseEnter={e => { e.currentTarget.style.background = '#fee2e2'; e.currentTarget.style.color = '#dc2626'; }}
-                      onMouseLeave={e => { e.currentTarget.style.background = ''; e.currentTarget.style.color = '#94a3b8'; }}>
-                      <EyeOff size={13} />
-                    </button>
-                  </div>
-                  <div className="flex items-end justify-between mb-3">
-                    <div>
-                      <div className="text-xl font-bold font-mono-nums" style={{ color: '#0f172a' }}>₹{stock.current_price?.toLocaleString('en-IN')}</div>
-                      <div className="flex items-center gap-1 text-xs font-bold mt-0.5" style={{ color: stock.change_percent >= 0 ? '#059669' : '#dc2626' }}>
-                        {stock.change_percent >= 0 ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
-                        {stock.change_percent >= 0 ? '+' : ''}{stock.change_percent?.toFixed(2)}%
+
+                    {/* Expandable news panel */}
+                    {isExpanded && (
+                      <div style={{ borderTop: '1px solid #f1f5f9', background: '#f8fafc' }}>
+                        <div className="px-5 py-3 flex items-center justify-between">
+                          <span className="text-xs font-semibold" style={{ color: '#64748b' }}>
+                            Latest news for {stock.ticker}
+                          </span>
+                          {sig && (
+                            <span className="text-[10px]" style={{ color: '#94a3b8' }}>
+                              {sig.positive_news} positive · {sig.negative_news} negative · {sig.neutral_news} neutral
+                            </span>
+                          )}
+                        </div>
+                        {loadingNews ? (
+                          <div className="px-5 pb-4 text-xs" style={{ color: '#94a3b8' }}>Loading news...</div>
+                        ) : articles.length === 0 ? (
+                          <div className="px-5 pb-4 text-xs" style={{ color: '#94a3b8' }}>No recent news found.</div>
+                        ) : (
+                          <div className="divide-y" style={{ borderColor: '#e2e8f0' }}>
+                            {articles.slice(0, 6).map((article, i) => (
+                              <a key={i} href={article.url} target="_blank" rel="noopener noreferrer"
+                                className="flex items-start gap-3 px-5 py-3 transition-colors"
+                                style={{ textDecoration: 'none' }}
+                                onMouseEnter={e => { e.currentTarget.style.background = '#ffffff'; }}
+                                onMouseLeave={e => { e.currentTarget.style.background = ''; }}>
+                                <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{
+                                  background: article.sentiment === 'positive' ? '#10b981' : article.sentiment === 'negative' ? '#ef4444' : '#f59e0b'
+                                }} />
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs leading-snug" style={{ color: '#334155' }}>{article.title}</p>
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="text-[10px]" style={{ color: '#94a3b8' }}>{article.source}</span>
+                                    {article.published_at && (
+                                      <span className="text-[10px]" style={{ color: '#cbd5e1' }}>
+                                        {new Date(article.published_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                                      </span>
+                                    )}
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded" style={{
+                                      background: article.sentiment === 'positive' ? '#f0fdf4' : article.sentiment === 'negative' ? '#fff1f2' : '#fffbeb',
+                                      color: article.sentiment === 'positive' ? '#15803d' : article.sentiment === 'negative' ? '#991b1b' : '#92400e',
+                                    }}>
+                                      {article.sentiment}
+                                    </span>
+                                  </div>
+                                </div>
+                              </a>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                    <div className="text-[10px]" style={{ color: '#94a3b8' }}>Base: ₹{stock.price_baseline?.toLocaleString('en-IN')}</div>
+                    )}
                   </div>
-                  {stockHistories[stock.ticker]?.length > 0 && (
-                    <ResponsiveContainer width="100%" height={48}>
-                      <LineChart data={stockHistories[stock.ticker].slice(-48)}>
-                        <Line type="monotone" dataKey="close" dot={false} stroke={stock.change_percent >= 0 ? '#059669' : '#dc2626'} strokeWidth={1.5} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  )}
-                  <div className="flex items-center gap-2 mt-3">
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{
-                      background: stock.change_percent >= 0 ? '#f0fdf4' : '#fff1f2',
-                      color: stock.change_percent >= 0 ? '#059669' : '#dc2626',
-                    }}>
-                      {stock.change_percent >= 0 ? '▲ Bullish' : '▼ Bearish'}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{ background: '#eff6ff', color: '#1e40af' }}>
-                      Monitoring
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -266,7 +406,7 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
             </div>
           </div>
 
-          {/* News */}
+          {/* Market News */}
           <div>
             <h3 className="text-base font-bold mb-3" style={{ color: '#0f172a' }}>Market News</h3>
             <div className="rounded-xl overflow-hidden max-h-80 overflow-y-auto custom-scrollbar" style={{ background: '#ffffff', border: '1px solid #e2e8f0' }}>

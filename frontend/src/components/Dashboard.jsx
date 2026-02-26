@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, BarChart3, ArrowUpRight, ArrowDownRight, RefreshCw, Newspaper, PieChart as PieIcon, Activity } from 'lucide-react';
 import { PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
-import axios from 'axios';
+import { authAxios } from '../utils/api';
 
 const SECTOR_COLORS = ['#2563eb', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16'];
 
@@ -44,7 +44,7 @@ export default function Dashboard({ indices, alerts, apiUrl, movers: propMovers,
 
   const fetchDashboardData = async () => {
     try {
-      const portfolioRes = await axios.get(`${apiUrl}/api/portfolio`);
+      const portfolioRes = await authAxios.get(`${apiUrl}/api/portfolio`);
       setPortfolio(portfolioRes.data);
     } catch (err) {
       console.log('Portfolio fetch error');
@@ -55,7 +55,7 @@ export default function Dashboard({ indices, alerts, apiUrl, movers: propMovers,
 
   const fetchPortfolioHistory = async (days) => {
     try {
-      const historyRes = await axios.get(`${apiUrl}/api/portfolio/history?days=${days}`);
+      const historyRes = await authAxios.get(`${apiUrl}/api/portfolio/history?days=${days}`);
       setPortfolioHistory(historyRes.data.history || []);
     } catch (err) {
       console.log('History fetch error');
@@ -203,7 +203,7 @@ export default function Dashboard({ indices, alerts, apiUrl, movers: propMovers,
                   <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={false} tickLine={false} dy={8} />
                   <YAxis hide />
                   <Tooltip {...lightTooltip} formatter={(v) => [`₹${v.toLocaleString('en-IN')}`, 'P&L']} />
-                  <Bar dataKey="pnl" radius={[4, 4, 4, 4]}>
+                  <Bar dataKey="pnl" radius={[4, 4, 4, 4]} minPointSize={4}>
                     {pnlData.map((entry, i) => <Cell key={i} fill={entry.fill} fillOpacity={0.85} />)}
                   </Bar>
                 </BarChart>
@@ -214,7 +214,7 @@ export default function Dashboard({ indices, alerts, apiUrl, movers: propMovers,
       )}
 
       {/* Portfolio History */}
-      {portfolioHistory.length > 0 && (
+      {portfolioHistory.length > 0 && portfolio && portfolio.num_holdings > 0 && (
         <div className="rounded-xl p-6" style={{ background: '#ffffff', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
           <div className="flex items-center justify-between mb-5">
             <h3 className="font-semibold text-sm flex items-center gap-2" style={{ color: '#0f172a' }}>
