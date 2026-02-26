@@ -1,0 +1,21 @@
+# Production overlay for RAM-constrained servers (e.g. AWS t2.micro, 1GB RAM).
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# What this does differently from the base file:
+#   - Disables the MCP server (not needed on server; it's for Claude Desktop only)
+#   - Lowers Celery concurrency to 1 to save RAM
+#   - Caps Redis to 128MB (down from 256MB) to leave more headroom for Flask
+
+services:
+  # Disable MCP server — not needed in cloud deployment
+  mcp-server:
+    deploy:
+      replicas: 0
+
+  # Lower Redis memory cap on 1GB RAM hosts
+  redis:
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+
+  # Lower Celery worker concurrency on 1GB RAM hosts
+  worker:
+    command: celery -A tasks worker --loglevel=info --concurrency=1

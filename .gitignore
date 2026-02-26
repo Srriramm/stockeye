@@ -76,6 +76,9 @@ dist-ssr/
 # ─── Docker ─────────────────────────────────────────────────────
 docker-compose.override.yml
 
+# ─── SSL Certificates ───────────────────────────────────────────
+ssl/
+
 # ─── Testing ────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
