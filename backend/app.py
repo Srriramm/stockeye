@@ -46,7 +46,12 @@ from portfolio_manager import (
     add_price_alert, get_active_price_alerts,
     get_portfolio_history, save_chat_message, get_chat_history, clear_chat_history
 )
-from auth_manager import require_auth, optional_auth, verify_token
+from auth_manager import require_auth, optional_auth, verify_token, require_admin, decode_jwt_payload
+from user_manager import (
+    ensure_user_registered, get_user_record, get_cached_user_status,
+    list_users, update_user_status, update_user_role, update_user_notes,
+    get_system_stats, list_invited_emails, add_invited_email, remove_invited_email,
+)
 from conversation_manager import (
     create_conversation, get_conversations, get_conversation,
     rename_conversation, delete_conversation, add_message,
@@ -141,6 +146,47 @@ set_realtime_socketio(socketio)
 init_database()
 
 # Note: sync_portfolio_to_monitors is now per-user; skipping global sync
+
+
+# ─── Beta Access Enforcement ────────────────────────────────────
+# Paths that bypass the approval check (must be accessible before registration)
+_OPEN_PATHS = {'/api/health', '/api/health/ready', '/api/auth/me'}
+
+@app.before_request
+def enforce_beta_access():
+    """
+    Block unapproved users from all API routes.
+    - /api/auth/me is always open (used for registration + status check)
+    - /api/admin/* is open here; @require_admin enforces its own auth+role check
+    - /socket.io/* is handled by the WebSocket connect handler
+    Everything else requires status='approved' in app_users.
+    """
+    path = request.path
+    if (path in _OPEN_PATHS or
+            path.startswith('/api/admin/') or
+            path.startswith('/socket.io')):
+        return None
+
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return None  # unauthenticated — @require_auth on the route returns 401
+
+    try:
+        user_id = verify_token(auth_header[7:].strip())  # Redis-cached, fast
+    except Exception:
+        return None  # invalid token — @require_auth handles the 401
+
+    # Fast path: check Redis cache first
+    cached = get_cached_user_status(user_id)
+    if cached:
+        status, _role = cached
+    else:
+        user = get_user_record(user_id)
+        status = user['status'] if user else 'rejected'
+
+    if status != 'approved':
+        return jsonify({'error': 'Access denied', 'status': status}), 403
+    return None
 
 
 # ─── Input Validation Functions ────────────────────────────────
@@ -245,8 +291,162 @@ def readiness_check():
 @app.route('/api/auth/me', methods=['GET'])
 @require_auth
 def get_me(user_id):
-    """Return current user info from JWT."""
-    return jsonify({'user_id': user_id})
+    """
+    Auto-register user on first login and return their profile + access status.
+    Called by the frontend immediately after authentication to determine
+    whether to show the app or the access-denied screen.
+    """
+    token = request.headers.get('Authorization', '')[7:]
+    payload = decode_jwt_payload(token)
+    email = payload.get('email', '')
+    meta = payload.get('user_metadata', {})
+    full_name = meta.get('full_name')
+    avatar_url = meta.get('avatar_url')
+
+    user = ensure_user_registered(user_id, email=email,
+                                  full_name=full_name, avatar_url=avatar_url)
+    return jsonify({
+        'user_id':    user_id,
+        'email':      user.get('email', email),
+        'full_name':  user.get('full_name'),
+        'avatar_url': user.get('avatar_url'),
+        'role':       user.get('role', 'user'),
+        'status':     user.get('status', 'rejected'),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADMIN ENDPOINTS  (all require @require_admin)
+# ═══════════════════════════════════════════════════════════════
+
+def _serialize_user(u: dict) -> dict:
+    """Convert timestamps to ISO strings for JSON serialisation."""
+    for k in ('created_at', 'approved_at', 'last_seen_at'):
+        v = u.get(k)
+        if v and not isinstance(v, str):
+            u[k] = v.isoformat()
+    return u
+
+
+@app.route('/api/admin/stats', methods=['GET'])
+@require_admin
+def admin_stats(user_id):
+    stats = get_system_stats()
+    return jsonify(stats)
+
+
+@app.route('/api/admin/users', methods=['GET'])
+@require_admin
+def admin_list_users(user_id):
+    status_filter = request.args.get('status', 'all')
+    limit  = min(int(request.args.get('limit', 100)), 200)
+    offset = int(request.args.get('offset', 0))
+    users = list_users(status=status_filter, limit=limit, offset=offset)
+    return jsonify([_serialize_user(u) for u in users])
+
+
+@app.route('/api/admin/users/<uid>/status', methods=['PATCH'])
+@require_admin
+def admin_update_status(user_id, uid):
+    data = request.get_json() or {}
+    new_status = data.get('status', '')
+    if not update_user_status(uid, new_status, approved_by=user_id):
+        return jsonify({'error': 'Invalid status value'}), 400
+    log_event(user_id, f'admin.user.status.{new_status}', entity_type='user',
+              details={'target_user_id': uid})
+    return jsonify({'ok': True})
+
+
+@app.route('/api/admin/users/<uid>/role', methods=['PATCH'])
+@require_admin
+def admin_update_role(user_id, uid):
+    data = request.get_json() or {}
+    new_role = data.get('role', '')
+    if not update_user_role(uid, new_role):
+        return jsonify({'error': 'Invalid role value'}), 400
+    log_event(user_id, 'admin.user.role.change', entity_type='user',
+              details={'target_user_id': uid, 'new_role': new_role})
+    return jsonify({'ok': True})
+
+
+@app.route('/api/admin/users/<uid>/notes', methods=['PATCH'])
+@require_admin
+def admin_update_notes(user_id, uid):
+    data = request.get_json() or {}
+    notes = data.get('notes', '')
+    update_user_notes(uid, notes)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/admin/audit', methods=['GET'])
+@require_admin
+def admin_audit_log(user_id):
+    filter_uid = request.args.get('user_id')
+    limit  = min(int(request.args.get('limit', 50)), 200)
+    offset = int(request.args.get('offset', 0))
+    from db import get_db_connection as _get_db
+    with _get_db() as conn:
+        if filter_uid:
+            rows = conn.execute(
+                'SELECT al.*, au.email AS user_email '
+                'FROM audit_log al '
+                'LEFT JOIN app_users au ON al.user_id = au.user_id '
+                'WHERE al.user_id = ? '
+                'ORDER BY al.created_at DESC LIMIT ? OFFSET ?',
+                (filter_uid, limit, offset)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT al.*, au.email AS user_email '
+                'FROM audit_log al '
+                'LEFT JOIN app_users au ON al.user_id = au.user_id '
+                'ORDER BY al.created_at DESC LIMIT ? OFFSET ?',
+                (limit, offset)
+            ).fetchall()
+    result = []
+    for r in rows:
+        entry = dict(r)
+        if entry.get('created_at') and not isinstance(entry['created_at'], str):
+            entry['created_at'] = entry['created_at'].isoformat()
+        # details may be a dict (psycopg2 JSONB) or string (SQLite)
+        if isinstance(entry.get('details'), str):
+            try:
+                entry['details'] = json.loads(entry['details'])
+            except Exception:
+                pass
+        result.append(entry)
+    return jsonify(result)
+
+
+@app.route('/api/admin/invites', methods=['GET'])
+@require_admin
+def admin_list_invites(user_id):
+    invites = list_invited_emails()
+    for inv in invites:
+        if inv.get('created_at') and not isinstance(inv['created_at'], str):
+            inv['created_at'] = inv['created_at'].isoformat()
+    return jsonify(invites)
+
+
+@app.route('/api/admin/invites', methods=['POST'])
+@require_admin
+def admin_add_invite(user_id):
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip()
+    if not email or '@' not in email:
+        return jsonify({'error': 'Valid email required'}), 400
+    notes = data.get('notes', '')
+    result = add_invited_email(email, added_by=user_id, notes=notes)
+    log_event(user_id, 'admin.invite.add', details={'email': email})
+    return jsonify(result), 201
+
+
+@app.route('/api/admin/invites/<path:email>', methods=['DELETE'])
+@require_admin
+def admin_remove_invite(user_id, email):
+    remove_invited_email(email)
+    log_event(user_id, 'admin.invite.remove', details={'email': email})
+    return jsonify({'ok': True})
 
 
 # ─── Conversations ───────────────────────────────────────────────

@@ -261,3 +261,34 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_user    ON audit_log(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event   ON audit_log(event_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
+
+-- ─── User Management (Beta Access Control) ────────────────────
+-- Stores every user who has signed in, with their role and access status.
+-- Backend reads/writes this via service connection (not RLS-filtered).
+CREATE TABLE IF NOT EXISTS app_users (
+    id           SERIAL PRIMARY KEY,
+    user_id      UUID UNIQUE NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    email        TEXT NOT NULL,
+    full_name    TEXT,
+    avatar_url   TEXT,
+    role         TEXT NOT NULL DEFAULT 'user',      -- 'user' | 'admin'
+    status       TEXT NOT NULL DEFAULT 'rejected',  -- 'approved' | 'rejected' | 'suspended'
+    notes        TEXT,
+    approved_by  UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    approved_at  TIMESTAMP,
+    last_seen_at TIMESTAMP,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_app_users_user_id ON app_users(user_id);
+CREATE INDEX IF NOT EXISTS idx_app_users_email   ON app_users(email);
+CREATE INDEX IF NOT EXISTS idx_app_users_status  ON app_users(status);
+
+-- Pre-approved email whitelist for invite-only beta.
+-- Adding an email here auto-approves any existing user with that email.
+CREATE TABLE IF NOT EXISTS invited_emails (
+    id         SERIAL PRIMARY KEY,
+    email      TEXT UNIQUE NOT NULL,
+    added_by   UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    notes      TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

@@ -8,7 +8,9 @@ Supabase API calls (tokens refresh every 5 minutes on the client).
 """
 
 import os
+import base64
 import hashlib
+import json as _json
 import logging
 import requests as _requests
 from functools import wraps
@@ -136,5 +138,54 @@ def optional_auth(f):
                 user_id = verify_token(auth_header[7:].strip())
             except Exception:
                 pass
+        return f(user_id, *args, **kwargs)
+    return decorated
+
+
+def decode_jwt_payload(token: str) -> dict:
+    """
+    Decode JWT payload without signature verification.
+    Safe to call only AFTER verify_token() has confirmed the token is authentic.
+    Returns the decoded payload dict, or {} on error.
+    """
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            return {}
+        # Add padding to make length a multiple of 4
+        padded = parts[1] + '=' * (-len(parts[1]) % 4)
+        payload = base64.urlsafe_b64decode(padded)
+        return _json.loads(payload)
+    except Exception:
+        return {}
+
+
+def require_admin(f):
+    """
+    Flask route decorator — requires valid JWT AND role='admin' in app_users.
+    Injects user_id as first positional argument (same as require_auth).
+
+    Usage:
+        @app.route('/api/admin/users')
+        @require_admin
+        def list_users(user_id):
+            ...
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Missing or invalid Authorization header'}), 401
+        token = auth_header[7:].strip()
+        try:
+            user_id = verify_token(token)
+        except Exception as e:
+            logger.warning(f"Admin auth failed: {e}")
+            return jsonify({'error': 'Unauthorized — invalid or expired token'}), 401
+        # Lazy import to avoid circular dependency at module load time
+        from user_manager import get_user_record
+        user = get_user_record(user_id)
+        if not user or user.get('role') != 'admin':
+            return jsonify({'error': 'Forbidden — admin access required'}), 403
         return f(user_id, *args, **kwargs)
     return decorated

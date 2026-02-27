@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Eye } from 'lucide-react';
+import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Eye, Shield } from 'lucide-react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { authAxios } from './utils/api';
@@ -18,6 +18,7 @@ import Forecast from './components/Forecast';
 import Screener from './components/Screener';
 import SectorHeatmap from './components/SectorHeatmap';
 import OAuthConsent from './components/OAuthConsent';
+import AdminDashboard from './components/AdminDashboard';
 import { supabase } from './lib/supabase';
 import wsManager from './utils/websocket';
 import * as apiCache from './utils/apiCache';
@@ -27,37 +28,131 @@ const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 // autoConnect: false — we connect manually after getting the auth token
 const socket = io(API_URL, { autoConnect: false, transports: ['websocket', 'polling'], reconnection: true, reconnectionDelay: 1000 });
 
+/* ─── Shared loading spinner ────────────────────────────── */
+function LoadingSpinner() {
+  return (
+    <div style={{
+      minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: '#f8fafc',
+    }}>
+      <div style={{
+        width: 36, height: 36,
+        border: '3px solid #e2e8f0', borderTopColor: '#2563eb',
+        borderRadius: '50%', animation: 'spin 0.8s linear infinite',
+      }} />
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+/* ─── Access Gate — shown when user is not approved ─────── */
+function AccessGatePage() {
+  const { user, userStatus, signOut } = useAuth();
+  const displayName = user?.user_metadata?.full_name || user?.email || 'there';
+
+  const isRejected  = userStatus === 'rejected';
+  const isSuspended = userStatus === 'suspended';
+
+  const handleSignOut = async () => {
+    try { await signOut(); } catch (e) { console.error(e); }
+  };
+
+  return (
+    <div style={{
+      minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: '#f8fafc', padding: '24px',
+    }}>
+      <div style={{
+        maxWidth: 440, width: '100%', background: '#ffffff',
+        borderRadius: 20, border: '1px solid #e2e8f0',
+        boxShadow: '0 4px 24px rgba(0,0,0,0.07)', padding: '40px 36px',
+        textAlign: 'center',
+      }}>
+        {/* Logo */}
+        <div style={{
+          width: 56, height: 56, borderRadius: 16, margin: '0 auto 20px',
+          background: 'linear-gradient(135deg, #2563eb, #3b82f6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          boxShadow: '0 4px 16px rgba(37,99,235,0.25)',
+        }}>
+          <Eye size={26} className="text-white" strokeWidth={2.5} style={{ color: '#fff' }} />
+        </div>
+
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: '#0f172a', margin: '0 0 8px' }}>
+          StockEye
+        </h1>
+
+        {isSuspended ? (
+          <>
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              background: '#fef3c7', color: '#92400e', borderRadius: 8,
+              padding: '6px 14px', fontSize: 13, fontWeight: 600, margin: '12px 0',
+            }}>
+              Account Suspended
+            </div>
+            <p style={{ color: '#64748b', fontSize: 14, lineHeight: 1.6, margin: '12px 0 0' }}>
+              Hi {displayName}, your account has been suspended.<br />
+              Please contact the administrator for assistance.
+            </p>
+          </>
+        ) : (
+          <>
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              background: '#fee2e2', color: '#991b1b', borderRadius: 8,
+              padding: '6px 14px', fontSize: 13, fontWeight: 600, margin: '12px 0',
+            }}>
+              {isRejected ? 'Not Invited' : 'Access Restricted'}
+            </div>
+            <p style={{ color: '#64748b', fontSize: 14, lineHeight: 1.6, margin: '12px 0 0' }}>
+              Hi {displayName}, you don't have access to the StockEye beta yet.
+              <br /><br />
+              This is an invite-only application. Please contact the administrator
+              to request access for <strong style={{ color: '#0f172a' }}>{user?.email}</strong>.
+            </p>
+          </>
+        )}
+
+        <button
+          onClick={handleSignOut}
+          style={{
+            marginTop: 28, width: '100%', padding: '11px 0',
+            borderRadius: 10, border: 'none', cursor: 'pointer',
+            background: '#f1f5f9', color: '#475569', fontSize: 14, fontWeight: 600,
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = '#e2e8f0'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = '#f1f5f9'; }}
+        >
+          Sign out
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Protected Route wrapper ───────────────────────────── */
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading } = useAuth();
+  const { isAuthenticated, userStatus, loading } = useAuth();
   const location = useLocation();
 
-  if (loading) {
-    return (
-      <div style={{
-        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: '#f8fafc',
-      }}>
-        <div style={{
-          width: 36, height: 36,
-          border: '3px solid #e2e8f0', borderTopColor: '#2563eb',
-          borderRadius: '50%', animation: 'spin 0.8s linear infinite',
-        }} />
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      </div>
-    );
-  }
+  if (loading) return <LoadingSpinner />;
+  if (!isAuthenticated) return <Navigate to="/login" state={{ from: location }} replace />;
+  if (!userStatus) return <LoadingSpinner />;  // waiting for /api/auth/me
+  if (userStatus === 'approved') return children;
+  return <AccessGatePage />;
+}
 
-  if (!isAuthenticated) {
-    return <Navigate to="/login" state={{ from: location }} replace />;
-  }
-
+/* ─── Admin Route wrapper ────────────────────────────────── */
+function AdminRoute({ children }) {
+  const { userRole } = useAuth();
+  if (userRole !== 'admin') return <Navigate to="/dashboard" replace />;
   return children;
 }
 
 /* ─── Main App (authenticated shell) ─────────────────────── */
 function AppShell() {
-  const { user, signOut } = useAuth();
+  const { user, userRole, signOut } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [unreadAlerts, setUnreadAlerts] = useState(0);
   const [indices, setIndices] = useState({});
@@ -156,6 +251,7 @@ function AppShell() {
     { to: '/portfolio', icon: Briefcase, label: 'Portfolio' },
     { to: '/chat', icon: MessageSquare, label: 'AI Advisor' },
     { to: '/monitor', icon: Activity, label: 'Monitor' },
+    ...(userRole === 'admin' ? [{ to: '/admin', icon: Shield, label: 'Admin' }] : []),
   ];
 
   // User avatar: use Google profile pic or initials
@@ -406,6 +502,9 @@ function AppShell() {
             <Route path="/portfolio" element={<Portfolio apiUrl={API_URL} socket={socket} />} />
             <Route path="/chat" element={<Chatbot apiUrl={API_URL} socket={socket} />} />
             <Route path="/monitor" element={<MarketMonitor apiUrl={API_URL} socket={socket} alerts={alerts} />} />
+            <Route path="/admin" element={
+              <AdminRoute><AdminDashboard apiUrl={API_URL} /></AdminRoute>
+            } />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </div>
