@@ -36,11 +36,11 @@ services:
     networks:
       - stockeye-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health/ready')"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
   # ─── Frontend Service ─────────────────────────────────────────
   frontend:
