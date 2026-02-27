@@ -16,6 +16,11 @@ services:
   redis:
     command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
 
+  # Mount Let's Encrypt certs from host into nginx container
+  frontend:
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+
   # Lower Celery worker concurrency on 1GB RAM hosts
   worker:
     command: celery -A tasks worker --loglevel=info --concurrency=1
