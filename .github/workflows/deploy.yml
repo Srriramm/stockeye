@@ -1,0 +1,36 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: SSH deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "── Pulling latest code ──"
+            cd ~/stockeye
+            git pull origin main
+
+            echo "── Rebuilding and restarting containers ──"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+            echo "── Removing unused images ──"
+            docker image prune -f
+
+            echo "── Container status ──"
+            docker compose ps
