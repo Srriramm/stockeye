@@ -19,7 +19,7 @@ services:
   # Set FRONTEND_URL so Flask-SocketIO accepts WebSocket connections from the server IP/domain
   backend:
     environment:
-      - FRONTEND_URL=${FRONTEND_URL:-http://13.233.111.42}
+      - FRONTEND_URL=${FRONTEND_URL}
 
   # Lower Celery worker concurrency on 1GB RAM hosts
   worker:
