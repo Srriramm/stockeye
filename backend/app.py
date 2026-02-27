@@ -3,9 +3,6 @@ Flask Main Server - API endpoints and WebSocket for the Stock Assistant.
 Handles chatbot queries, stock data, portfolio management, and monitoring.
 """
 
-import eventlet
-eventlet.monkey_patch()
-
 import os
 import sys
 import json
@@ -115,14 +112,17 @@ CORS(app, resources={r"/api/*": {
 }})
 
 _REDIS_URL = os.getenv('REDIS_URL')
+# SOCKETIO_MESSAGE_QUEUE: only set this when running multiple Flask workers
+# (e.g. docker compose scale backend=3) so events emitted in one process
+# reach clients connected to another.  On a single-process EC2 instance,
+# leave it unset — Redis pub/sub is not needed and monkey-patching breaks
+# Docker's internal DNS resolver, causing 20-second timeouts on every request.
+_SOCKETIO_QUEUE = os.getenv('SOCKETIO_MESSAGE_QUEUE')
 socketio = SocketIO(
     app,
     cors_allowed_origins=allowed_origins,
     async_mode='eventlet',
-    # When REDIS_URL is set, SocketIO uses Redis pub/sub so that WebSocket
-    # events emitted by Celery workers or other Flask instances are
-    # broadcast to all connected clients across every server process.
-    message_queue=_REDIS_URL,
+    message_queue=_SOCKETIO_QUEUE,
 )
 
 # Attach request-ID injection and structured logging middleware
