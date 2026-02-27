@@ -3,6 +3,9 @@ Flask Main Server - API endpoints and WebSocket for the Stock Assistant.
 Handles chatbot queries, stock data, portfolio management, and monitoring.
 """
 
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import sys
 import json
