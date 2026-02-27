@@ -19,7 +19,7 @@ class WebSocketManager {
    * Initialize WebSocket connection
    * @param {string} url - Backend WebSocket URL
    */
-  connect(url = 'http://localhost:5000') {
+  connect(url = 'http://localhost:5000', token = null) {
     if (this.socket && this.connected) {
       console.log('[WS] Already connected');
       return;
@@ -28,6 +28,7 @@ class WebSocketManager {
     console.log('[WS] Connecting to', url);
 
     this.socket = io(url, {
+      query: token ? { token } : {},
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 1000,

@@ -18,12 +18,14 @@ import Forecast from './components/Forecast';
 import Screener from './components/Screener';
 import SectorHeatmap from './components/SectorHeatmap';
 import OAuthConsent from './components/OAuthConsent';
+import { supabase } from './lib/supabase';
 import wsManager from './utils/websocket';
 import * as apiCache from './utils/apiCache';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
-const socket = io(API_URL, { transports: ['websocket', 'polling'], reconnection: true, reconnectionDelay: 1000 });
+// autoConnect: false — we connect manually after getting the auth token
+const socket = io(API_URL, { autoConnect: false, transports: ['websocket', 'polling'], reconnection: true, reconnectionDelay: 1000 });
 
 /* ─── Protected Route wrapper ───────────────────────────── */
 function ProtectedRoute({ children }) {
@@ -74,7 +76,17 @@ function AppShell() {
       setAlerts(prev => [alert, ...prev].slice(0, 50));
       setUnreadAlerts(prev => prev + 1);
     });
-    wsManager.connect(API_URL);
+
+    // Connect sockets with the Supabase access token so the server can auth the WS handshake
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      const token = session?.access_token;
+      if (token) {
+        socket.io.opts.query = { token };
+        wsManager.connect(API_URL, token);
+      }
+      socket.connect();
+    });
+
     return () => {
       socket.off('connect');
       socket.off('disconnect');
