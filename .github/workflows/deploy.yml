@@ -24,7 +24,8 @@ jobs:
 
             echo "── Pulling latest code ──"
             cd ~/stockeye
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
 
             echo "── Rebuilding and restarting containers ──"
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
