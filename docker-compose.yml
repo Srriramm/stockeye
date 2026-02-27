@@ -62,9 +62,9 @@ services:
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
       interval: 30s
-      timeout: 3s
+      timeout: 5s
       retries: 3
-      start_period: 5s
+      start_period: 30s
 
   # ─── Celery Worker (background monitoring) ───────────────────
   worker:
@@ -85,6 +85,8 @@ services:
     restart: unless-stopped
     networks:
       - stockeye-network
+    healthcheck:
+      disable: true
 
   # ─── Celery Beat (task scheduler) ────────────────────────────
   beat:
@@ -105,6 +107,8 @@ services:
     restart: unless-stopped
     networks:
       - stockeye-network
+    healthcheck:
+      disable: true
 
   # ─── MCP Server Service ───────────────────────────────────────
   mcp-server:
