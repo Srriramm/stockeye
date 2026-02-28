@@ -4,7 +4,7 @@ import { authAxios } from '../utils/api';
 
 const AuthContext = createContext(null);
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_URL = process.env.REACT_APP_API_URL || '';
 
 // sessionStorage keys — cleared on sign-out
 const SK_STATUS = 'se_user_status';

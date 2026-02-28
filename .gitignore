@@ -5,10 +5,10 @@
 # ─── Environment & Secrets ──────────────────────────────────────
 .env
 .env.local
-.env.production
 .env.*.local
 backend/.env
 frontend/.env.local
+# frontend/.env.production is committed — it only sets REACT_APP_API_URL='' (not sensitive)
 *.pem
 *.key
 *.crt

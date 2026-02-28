@@ -34,7 +34,20 @@ export async function getAuthHeaders() {
 export const authAxios = axios.create({ timeout: 30000 });
 
 authAxios.interceptors.request.use(async (config) => {
-    const headers = await getAuthHeaders();
-    config.headers = { ...config.headers, ...headers };
+    try {
+        const result = await Promise.race([
+            supabase.auth.getSession(),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('getSession timeout')), 8000)
+            ),
+        ]);
+        const session = result?.data?.session;
+        if (session?.access_token) {
+            config.headers = { ...config.headers, Authorization: `Bearer ${session.access_token}` };
+        }
+    } catch {
+        // getSession timed out or failed — proceed without auth header;
+        // the server will return 401 which the caller's catch block handles.
+    }
     return config;
 });

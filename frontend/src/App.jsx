@@ -23,7 +23,7 @@ import { supabase } from './lib/supabase';
 import wsManager from './utils/websocket';
 import * as apiCache from './utils/apiCache';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_URL = process.env.REACT_APP_API_URL || '';
 
 /* ─── Shared loading spinner ────────────────────────────── */
 function LoadingSpinner() {
@@ -159,7 +159,7 @@ function AppShell() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!session?.access_token) return;
-      wsManager.connect(API_URL, session.access_token);
+      wsManager.connect(API_URL || window.location.origin, session.access_token);
       const s = wsManager.socket;
       if (!s) return;
       s.on('connect', () => setConnected(true));
