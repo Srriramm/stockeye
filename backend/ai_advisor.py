@@ -201,9 +201,9 @@ def get_stock_advice(user_query, market_context=None, stock_data=None, news_data
 
     if not openai_client:
         return {
-            'response': _get_fallback_response(user_query),
-            'data_used': 'No OpenAI API key configured. Using fallback response.',
-            'error': 'OpenAI API key not configured. Add OPENAI_API_KEY to your .env file.'
+            'response': 'AI service unavailable — OPENAI_API_KEY is not configured.',
+            'data_used': '',
+            'error': 'OpenAI API key not configured.'
         }
 
     # Prepare context
@@ -260,11 +260,10 @@ Please provide your analysis and advice based on the above real-time data."""
         error_msg = str(e)
         logger.error(f"OpenAI API error: {error_msg}", exc_info=True)
 
-        # Return meaningful fallback
         return {
-            'response': _get_fallback_response(user_query),
+            'response': f'AI service error: {error_msg}',
             'data_used': context[:200] if context else '',
-            'error': f'AI service error: {error_msg}. Using fallback response.'
+            'error': error_msg
         }
 
 
@@ -312,11 +311,11 @@ def get_stock_advice_dual(user_query, provider='auto', conversation_history=None
         return _query_openai(user_query, query_type, conversation_history=conversation_history, **context)
     else:
         return {
-            'response': _get_fallback_response(user_query),
+            'response': 'AI service unavailable — please configure OPENAI_API_KEY or ANTHROPIC_API_KEY.',
             'provider_used': 'none',
-            'model_used': 'fallback',
+            'model_used': 'none',
             'query_type': query_type,
-            'error': 'No AI provider available. Please configure OPENAI_API_KEY or ANTHROPIC_API_KEY in .env file.'
+            'error': 'No AI provider configured.'
         }
 
 
@@ -385,11 +384,11 @@ Please provide your analysis and advice based on the above real-time data."""
         error_msg = str(e)
         logger.error(f"OpenAI API error: {error_msg}", exc_info=True)
         return {
-            'response': _get_fallback_response(user_query),
+            'response': f'AI service error: {error_msg}',
             'provider_used': 'openai',
             'model_used': 'gpt-4o',
             'query_type': query_type,
-            'error': f'OpenAI error: {error_msg}'
+            'error': error_msg
         }
 
 
@@ -461,11 +460,11 @@ Please provide your analysis and advice based on the above real-time data."""
         error_msg = str(e)
         logger.error(f"Anthropic API error: {error_msg}", exc_info=True)
         return {
-            'response': _get_fallback_response(user_query),
+            'response': f'AI service error: {error_msg}',
             'provider_used': 'anthropic',
             'model_used': model,
             'query_type': query_type,
-            'error': f'Anthropic error: {error_msg}'
+            'error': error_msg
         }
 
 
@@ -521,67 +520,3 @@ def compare_stocks(ticker1, ticker2, comparison_data=None):
     # Stock comparison is deep analysis - will route to Claude
     return get_stock_advice_dual(query, provider='auto', stock_data=comparison_data)
 
-
-# ─── Fallback Responses ────────────────────────────────────────
-
-def _get_fallback_response(query):
-    """Provide intelligent fallback when OpenAI is unavailable."""
-    query_lower = query.lower()
-
-    if any(word in query_lower for word in ['recommend', 'buy', 'invest', 'suggestion']):
-        return """I'm currently unable to connect to the AI service, but here are some general tips for Indian stock investing:
-
-📊 **General Recommendations for Beginners:**
-
-1. **Large-cap stocks** (NIFTY 50) are generally safer for beginners
-2. **Diversify** across at least 3-4 sectors (IT, Banking, FMCG, Pharma)
-3. Start with **blue-chip stocks** like HDFC Bank, TCS, Reliance, Infosys
-4. Use **SIP approach** - invest fixed amounts at regular intervals
-5. Keep **20-30% in defensive stocks** (ITC, Hindustan Unilever)
-
-📈 **Key Metrics to Check:**
-- P/E Ratio < sector average (value stocks)
-- Consistent revenue & profit growth
-- Low debt-to-equity ratio
-- Good ROE (>15%)
-
-⚠️ **Please configure your OpenAI API key** in the .env file to get personalized, data-driven recommendations.
-
-⚠️ This is general information only. Please consult a SEBI-registered financial advisor."""
-
-    elif any(word in query_lower for word in ['market', 'nifty', 'sensex', 'today']):
-        return """I'm unable to provide AI-powered market insights right now (OpenAI API not configured).
-
-You can check the **Market Overview** section for real-time NIFTY and SENSEX data.
-
-📊 **General Market Tips:**
-- Check market indices (NIFTY 50, SENSEX) for overall direction
-- Watch FII/DII data for institutional activity
-- Monitor global markets (US futures, Asian markets) for cues
-
-⚠️ Configure your OpenAI API key in .env for AI-powered market analysis."""
-
-    elif any(word in query_lower for word in ['portfolio', 'review', 'holdings']):
-        return """I can see your portfolio data but need the AI service to provide intelligent analysis.
-
-📊 **General Portfolio Tips:**
-- Aim for 10-15 stocks across 5-6 sectors
-- No single stock > 15-20% of portfolio
-- Rebalance quarterly
-- Review underperformers every 6 months
-- Keep some cash (10-15%) for opportunities
-
-⚠️ Configure your OpenAI API key in .env for AI-powered portfolio review."""
-
-    else:
-        return """I'm your AI Stock Assistant! I can help with:
-
-🤖 **Stock Recommendations** - "I have ₹10,000, what should I invest in?"
-📊 **Stock Analysis** - "Should I buy Reliance?"
-📈 **Market Insights** - "What's happening in the market today?"
-💼 **Portfolio Review** - "Review my portfolio"
-🔍 **Comparisons** - "Compare TCS vs Infosys"
-🏢 **Sector Analysis** - "Tell me about IT sector stocks"
-
-⚠️ Note: For AI-powered responses, please add your OpenAI API key to the .env file.
-Currently providing rule-based responses."""

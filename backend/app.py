@@ -66,7 +66,6 @@ from stock_data import (
 )
 from news_monitor import fetch_stock_news, fetch_market_news, get_news_summary, get_reddit_sentiment
 from ai_advisor import get_stock_advice, get_stock_advice_dual, analyze_stock, get_portfolio_review, compare_stocks
-from ai_advisor_enhanced import get_budget_based_recommendation, extract_budget_from_message
 from market_monitor import monitor_service, set_socketio as set_monitor_socketio
 from realtime_service import realtime_service, set_socketio as set_realtime_socketio
 from watchlist_manager import (
@@ -518,27 +517,6 @@ def chat(user_id):
 
     # Load per-user conversation history to pass to AI (never use a global list)
     prior_messages = get_messages(user_id, cid, limit=20)
-
-    # Check if this is a budget-based investment query
-    budget = extract_budget_from_message(user_message)
-    message_lower = user_message.lower()
-    is_investment_query = any(word in message_lower for word in ['invest', 'buy', 'stock', 'recommend', 'which stock'])
-
-    if budget and is_investment_query:
-        # Use enhanced AI advisor with real stock data
-        logger.info(f"Budget-based query detected: ₹{budget}")
-        result = get_budget_based_recommendation(budget, user_message, provider)
-        add_message(user_id, cid, 'assistant', result['response'])
-
-        return jsonify({
-            'response': result['response'],
-            'provider_used': result.get('provider_used', 'none'),
-            'query_type': 'budget_investment',
-            'budget': budget,
-            'stocks_analyzed': result.get('stocks_found', 0),
-            'data_used': result.get('data_used', ''),
-            'timestamp': datetime.now().isoformat(),
-        })
 
     # Detect query intent and fetch relevant data
     stock_data = None
