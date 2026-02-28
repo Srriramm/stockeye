@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { authAxios } from '../utils/api';
@@ -92,16 +92,34 @@ export function AuthProvider({ children }) {
             async (_event, s) => {
                 setSession(s);
                 setUser(s?.user ?? null);
-                if (s) {
-                    // Pass the token directly — avoids calling getSession() inside
-                    // the auth callback which deadlocks on Supabase's refresh lock
-                    await fetchUserMeta(false, s.access_token);
-                } else if (_event === 'SIGNED_OUT') {
-                    // Only clear cached status on explicit sign-out, not on
-                    // transient null-session events during token refresh
+
+                if (_event === 'SIGNED_OUT') {
+                    // Explicit sign-out — clear everything
                     setUserRole(null);
                     setUserStatus(null);
+                    setLoading(false);
+                    return;
                 }
+
+                if (_event === 'INITIAL_SESSION') {
+                    // init() already handles this via supabase.auth.getSession(), which
+                    // waits for any pending token refresh before returning. Supabase fires
+                    // INITIAL_SESSION with the stored (possibly expired) token BEFORE
+                    // refreshing it, so calling /api/auth/me here would get a 401 → status
+                    // flips to 'rejected'. Let init() do the blocking fetch instead.
+                    setLoading(false);
+                    return;
+                }
+
+                if (!s) {
+                    setLoading(false);
+                    return;
+                }
+
+                // SIGNED_IN: fresh login — no cached status yet, treat errors as fatal
+                // TOKEN_REFRESHED / USER_UPDATED / etc: keep cached values on error
+                const isBackground = _event !== 'SIGNED_IN';
+                await fetchUserMeta(isBackground, s.access_token);
                 setLoading(false);
             }
         );
