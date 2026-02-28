@@ -101,16 +101,27 @@ def calculate_portfolio_value(user_id, current_prices):
     holdings_data = []
     for h in holdings:
         ticker = h['ticker']
-        current_price = current_prices.get(ticker, h['buy_price'])
+        live_price = current_prices.get(ticker)      # None when yfinance fetch failed
+        price_live = live_price is not None
+        # Fall back to buy_price only for total-value math; flag it so the UI
+        # can show a "stale price" indicator instead of silently showing wrong P&L
+        current_price = live_price if price_live else h['buy_price']
         investment = h['quantity'] * h['buy_price']
         current_val = h['quantity'] * current_price
         pnl = current_val - investment
         pnl_pct = (pnl / investment * 100) if investment > 0 else 0
         total_value += current_val
         total_investment += investment
-        holdings_data.append({**h, 'current_price': current_price,
-            'investment': round(investment, 2), 'current_value': round(current_val, 2),
-            'pnl': round(pnl, 2), 'pnl_percent': round(pnl_pct, 2), 'portfolio_percent': 0})
+        holdings_data.append({
+            **h,
+            'current_price': current_price,
+            'price_live': price_live,          # False → showing buy_price as fallback
+            'investment': round(investment, 2),
+            'current_value': round(current_val, 2),
+            'pnl': round(pnl, 2),
+            'pnl_percent': round(pnl_pct, 2),
+            'portfolio_percent': 0,
+        })
     for h in holdings_data:
         h['portfolio_percent'] = round((h['current_value'] / total_value * 100) if total_value > 0 else 0, 2)
     total_pnl = total_value - total_investment

@@ -818,6 +818,12 @@ def get_portfolio(user_id):
     prices = get_bulk_prices(tickers)
     portfolio = calculate_portfolio_value(user_id, prices)
 
+    # Enrich each holding's sector from POPULAR_INDIAN_STOCKS if not already set
+    # (fast dict lookup — no extra API calls)
+    for h in portfolio['holdings']:
+        if not h.get('sector'):
+            h['sector'] = POPULAR_INDIAN_STOCKS.get(h['ticker'], {}).get('sector', '')
+
     return jsonify(portfolio)
 
 
@@ -1012,8 +1018,9 @@ def monitored_stocks_list(user_id):
         price_data = get_stock_price(ticker)
         enriched.append({
             **stock,
-            'current_price': price_data['current_price'] if price_data else 0,
+            'current_price': price_data['current_price'] if price_data else None,
             'change_percent': price_data.get('change_percent', 0) if price_data else 0,
+            'price_live': price_data is not None,
         })
 
     return jsonify({'stocks': enriched})
