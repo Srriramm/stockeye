@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Eye, Shield } from 'lucide-react';
+import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Shield } from 'lucide-react';
+import StockEyeLogo from './components/StockEyeLogo';
 import io from 'socket.io-client';
 import axios from 'axios';
 import { authAxios } from './utils/api';
@@ -69,13 +70,8 @@ function AccessGatePage() {
         textAlign: 'center',
       }}>
         {/* Logo */}
-        <div style={{
-          width: 56, height: 56, borderRadius: 16, margin: '0 auto 20px',
-          background: 'linear-gradient(135deg, #2563eb, #3b82f6)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          boxShadow: '0 4px 16px rgba(37,99,235,0.25)',
-        }}>
-          <Eye size={26} className="text-white" strokeWidth={2.5} style={{ color: '#fff' }} />
+        <div style={{ margin: '0 auto 20px', display: 'flex', justifyContent: 'center' }}>
+          <StockEyeLogo size={56} />
         </div>
 
         <h1 style={{ fontSize: 22, fontWeight: 700, color: '#0f172a', margin: '0 0 8px' }}>
@@ -272,12 +268,7 @@ function AppShell() {
           {sidebarOpen ? (
             <div className="flex items-center gap-3 fade-in">
               <div className="relative">
-                <div
-                  className="w-8 h-8 rounded-xl flex items-center justify-center"
-                  style={{ background: 'linear-gradient(135deg, #2563eb, #3b82f6)', boxShadow: '0 4px 12px rgba(37, 99, 235, 0.25)' }}
-                >
-                  <Eye size={16} className="text-white" strokeWidth={2.5} />
-                </div>
+                <StockEyeLogo size={32} />
                 <div
                   className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white"
                   style={{ background: connected ? '#10b981' : '#ef4444' }}
@@ -290,12 +281,7 @@ function AppShell() {
             </div>
           ) : (
             <div className="w-full flex justify-center">
-              <div
-                className="w-8 h-8 rounded-xl flex items-center justify-center"
-                style={{ background: 'linear-gradient(135deg, #2563eb, #3b82f6)', boxShadow: '0 4px 12px rgba(37,99,235,0.2)' }}
-              >
-                <Eye size={16} className="text-white" />
-              </div>
+              <StockEyeLogo size={32} />
             </div>
           )}
           <button

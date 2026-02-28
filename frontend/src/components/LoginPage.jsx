@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { TrendingUp, Eye } from 'lucide-react';
+import StockEyeLogo from './StockEyeLogo';
 
 export default function LoginPage() {
     const { signInWithGoogle, isAuthenticated, loading } = useAuth();
@@ -44,9 +44,7 @@ export default function LoginPage() {
                 {/* Logo & Brand */}
                 <div style={styles.logoSection}>
                     <div style={styles.logoContainer}>
-                        <div style={styles.logoIconWrapper}>
-                            <Eye size={28} color="#ffffff" strokeWidth={2.5} />
-                        </div>
+                        <StockEyeLogo size={64} />
                         <div style={styles.logoPulse} />
                     </div>
                     <h1 style={styles.brandName}>StockEye</h1>

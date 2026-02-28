@@ -425,7 +425,7 @@ function InvitesTab({ apiUrl }) {
             style={{
               flex: '2 1 200px', padding: '8px 12px', borderRadius: 8,
               border: '1px solid #e2e8f0', fontSize: 13, outline: 'none',
-              fontFamily: 'inherit',
+              fontFamily: 'inherit', color: '#0f172a', background: '#ffffff',
             }}
           />
           <input
@@ -436,6 +436,7 @@ function InvitesTab({ apiUrl }) {
             style={{
               flex: '3 1 200px', padding: '8px 12px', borderRadius: 8,
               border: '1px solid #e2e8f0', fontSize: 13, outline: 'none',
+              color: '#0f172a', background: '#ffffff',
               fontFamily: 'inherit',
             }}
           />
