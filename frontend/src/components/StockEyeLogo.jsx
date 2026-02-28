@@ -5,16 +5,16 @@ import React from 'react';
  * Style: Minimal, corporate, intelligent. Geometric sans, "o" as an integrated eye/graph.
  *
  * Props:
- *   size     — Base height in pixels. (Width will auto-scale to roughly size * 4.6).
+ *   size     — Base height in pixels. (Width will auto-scale to size * 3.75).
  *   bare     — If true, removes the navy background.
  *   iconOnly — If true, crop just to the "o" symbol.
  */
 export default function StockEyeLogo({ size = 36, bare = false, iconOnly = false }) {
-  const width = iconOnly ? size * 1.2 : size * 4.6;
+  const width = iconOnly ? size * 1.5 : size * 3.75;
   const height = size;
 
-  // ViewBox: Full wordmark is ~ 550x120. Icon only focuses on the "o" at x:200.
-  const viewBoxStr = iconOnly ? "188 35 44 44" : "0 0 550 120";
+  // ViewBox: Full wordmark is 450x120. Icon focuses directly on the "o" at x:148, y:65.
+  const viewBoxStr = iconOnly ? "124 40 50 50" : "0 0 450 120";
 
   return (
     <svg
@@ -25,29 +25,33 @@ export default function StockEyeLogo({ size = 36, bare = false, iconOnly = false
       style={{ display: 'block', flexShrink: 0 }}
     >
       {/* Background */}
-      {!bare && <rect width="550" height="120" fill="#0A111F" />}
+      {!bare && <rect width="450" height="120" fill="#0A111F" />}
 
       {/* Typography: "St" */}
       <text
-        x="60"
+        x="64"
         y="80"
         fontFamily="'Inter', 'Circular', 'Helvetica Neue', sans-serif"
         fontWeight="600"
         fontSize="56"
-        letterSpacing="1.5"
+        letterSpacing="1"
         fill="#F4F5F7"
       >
         St
       </text>
 
-      {/* The geometric "o" eye/graph element */}
-      <g transform="translate(210, 57)">
-        {/* Outer Circular Stroke (Slightly thicker than other letters for balance, strictly 1 circle) */}
-        <circle cx="0" cy="0" r="18" fill="none" stroke="#F4F5F7" strokeWidth="6" />
+      {/* The geometric "o" eye/graph element
+          - Lifted Y to 64 to perfect baseline alignment
+          - Broadened radius
+          - Tuned stroke down slightly so the inner gap breathes better
+      */}
+      <g transform="translate(148, 64)">
+        {/* Outer Circular Stroke: Much more generous inner space (radius 15.5) */}
+        <circle cx="0" cy="0" r="15.5" fill="none" stroke="#F4F5F7" strokeWidth="6" />
 
-        {/* Internal Graph Line (Hairline weight, clean upward trend, 3 anchor points) */}
+        {/* Internal Graph Line: Smooth upward curve, 3 points. Taller amplitude. */}
         <path
-          d="M -9 4 L -2 -1 L 2 2 L 9 -5"
+          d="M -7 4 L -2 -1 L 2 3 L 8 -6"
           fill="none"
           stroke="#00FF88"
           strokeWidth="1.5"
@@ -55,18 +59,18 @@ export default function StockEyeLogo({ size = 36, bare = false, iconOnly = false
           strokeLinejoin="round"
         />
 
-        {/* Internal Pupil Dot */}
-        <circle cx="0" cy="0" r="2.5" fill="#00FF88" />
+        {/* Internal Pupil Dot: Sharp center */}
+        <circle cx="0" cy="0" r="2" fill="#00FF88" />
       </g>
 
       {/* Typography: "ckeye" */}
       <text
-        x="245"
+        x="172"
         y="80"
         fontFamily="'Inter', 'Circular', 'Helvetica Neue', sans-serif"
         fontWeight="600"
         fontSize="56"
-        letterSpacing="1.5"
+        letterSpacing="1"
         fill="#F4F5F7"
       >
         ckeye

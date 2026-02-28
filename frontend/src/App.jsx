@@ -130,7 +130,6 @@ function ProtectedRoute({ children }) {
 
   if (loading) return <LoadingSpinner />;
   if (!isAuthenticated) return <Navigate to="/login" state={{ from: location }} replace />;
-  if (!userStatus) return <LoadingSpinner />;  // waiting for /api/auth/me
   if (userStatus === 'approved') return children;
   return <AccessGatePage />;
 }

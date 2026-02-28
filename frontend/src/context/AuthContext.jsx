@@ -45,20 +45,24 @@ export function AuthProvider({ children }) {
         };
 
         const init = async () => {
-            const { data: { session: s } } = await supabase.auth.getSession();
-            setSession(s);
-            setUser(s?.user ?? null);
-            if (s) {
-                // If we already have a cached status, unblock the UI immediately
-                // and refresh in the background
-                if (sessionStorage.getItem(SK_STATUS)) {
-                    setLoading(false);
-                    fetchUserMeta();   // background refresh — no await
+            try {
+                const { data: { session: s } } = await supabase.auth.getSession();
+                setSession(s);
+                setUser(s?.user ?? null);
+                if (s) {
+                    // If we already have a cached status, unblock the UI immediately
+                    // and refresh in the background
+                    if (sessionStorage.getItem(SK_STATUS)) {
+                        setLoading(false);
+                        fetchUserMeta();   // background refresh — no await
+                    } else {
+                        await fetchUserMeta();
+                        setLoading(false);
+                    }
                 } else {
-                    await fetchUserMeta();
                     setLoading(false);
                 }
-            } else {
+            } catch {
                 setLoading(false);
             }
         };
@@ -70,7 +74,9 @@ export function AuthProvider({ children }) {
                 setUser(s?.user ?? null);
                 if (s) {
                     await fetchUserMeta();
-                } else {
+                } else if (_event === 'SIGNED_OUT') {
+                    // Only clear cached status on explicit sign-out, not on
+                    // transient null-session events during token refresh
                     setUserRole(null);
                     setUserStatus(null);
                 }
