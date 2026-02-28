@@ -612,14 +612,13 @@ def chat_history(user_id):
     convs = get_conversations(user_id)
     if not convs:
         return jsonify({'messages': [], 'conversation_id': None})
-    # Merge messages from all conversations in chronological order so the
-    # user sees their full history, not just the last conversation.
+    # Merge messages from all conversations in chronological order.
+    # get_conversations() returns newest-first, so iterate reversed (oldest-first)
+    # so the combined list is in ascending time order (oldest at top, newest at bottom).
     all_messages = []
-    for conv in convs:
+    for conv in reversed(convs):
         msgs = get_messages(user_id, conv['id'], limit=limit)
         all_messages.extend(msgs)
-    # Sort by created_at ascending and trim to limit
-    all_messages.sort(key=lambda m: m.get('created_at', ''))
     all_messages = all_messages[-limit:]
     # Return the most-recent conversation_id so the frontend can continue it
     latest_cid = convs[0]['id']
