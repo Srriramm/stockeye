@@ -71,7 +71,7 @@ function AccessGatePage() {
       }}>
         {/* Logo */}
         <div style={{ margin: '0 auto 20px', display: 'flex', justifyContent: 'center' }}>
-          <StockEyeLogo size={64} bare={true} />
+          <StockEyeLogo size={90} dark={false} />
         </div>
 
         {isSuspended ? (
@@ -261,21 +261,17 @@ function AppShell() {
         {/* Brand */}
         <div className="h-16 flex items-center justify-between px-4 flex-shrink-0" style={{ borderBottom: '1px solid #f1f5f9' }}>
           {sidebarOpen ? (
-            <div className="flex items-center gap-3 fade-in">
-              <div className="relative">
-                <StockEyeLogo size={32} bare={true} />
-                <div
-                  className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white"
-                  style={{ background: connected ? '#10b981' : '#ef4444' }}
-                />
-              </div>
-              <div>
-                <span className="text-[10px] font-semibold tracking-wider uppercase" style={{ color: '#2563eb' }}>Pro Console</span>
-              </div>
+            <div className="flex items-center gap-2 fade-in">
+              <StockEyeLogo size={52} dark={false} />
+              <div
+                className="w-2 h-2 rounded-full flex-shrink-0"
+                style={{ background: connected ? '#10b981' : '#ef4444' }}
+                title={connected ? 'Connected' : 'Disconnected'}
+              />
             </div>
           ) : (
             <div className="w-full flex justify-center">
-              <StockEyeLogo size={32} bare={true} iconOnly={true} />
+              <StockEyeLogo size={46} dark={false} iconOnly={true} />
             </div>
           )}
           <button

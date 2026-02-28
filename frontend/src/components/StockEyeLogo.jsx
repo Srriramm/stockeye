@@ -1,80 +1,58 @@
 import React from 'react';
 
 /**
- * Stockeye modern AI fintech logo.
- * Style: Minimal, corporate, intelligent. Geometric sans, "o" as an integrated eye/graph.
+ * StockEye text logo — Poppins Bold 700.
+ * The letter "o" in "Stockeye" pulses blue → teal in a continuous loop.
  *
- * Props:
- *   size     — Base height in pixels. (Width will auto-scale to size * 3.75).
- *   bare     — If true, removes the navy background.
- *   iconOnly — If true, crop just to the "o" symbol.
+ * Props
+ *   size     — approximate height in px (controls font-size proportionally)
+ *   dark     — true = white text for dark backgrounds (login page)
+ *              false (default) = dark text for light backgrounds (sidebar)
+ *   iconOnly — true = renders only the animated "o" (collapsed sidebar icon)
  */
-export default function StockEyeLogo({ size = 36, bare = false, iconOnly = false }) {
-  const width = iconOnly ? size * 1.5 : size * 3.75;
-  const height = size;
+export default function StockEyeLogo({ size = 36, dark = false, iconOnly = false }) {
+  const animId   = React.useId().replace(/:/g, '');
+  const kf       = `se_o_${animId}`;
+  const fontSize = Math.round(size * 0.58);
+  const textColor = dark ? '#f1f5f9' : '#0f172a';
 
-  // ViewBox: Full wordmark is 450x120. Icon focuses directly on the "o" at x:148, y:65.
-  const viewBoxStr = iconOnly ? "124 40 50 50" : "0 0 450 120";
+  const font = "'Poppins', 'Nunito', 'Google Sans', system-ui, sans-serif";
+
+  const keyframes = `
+    @keyframes ${kf} {
+      0%, 100% { color: ${textColor}; text-shadow: none; }
+      40%  { color: #3b82f6; text-shadow: 0 0 14px rgba(59,130,246,0.55); }
+      60%  { color: #06b6d4; text-shadow: 0 0 14px rgba(6,182,212,0.55); }
+    }
+  `;
+
+  const oStyle = {
+    display: 'inline-block',
+    animation: `${kf} 2.6s ease-in-out infinite`,
+  };
+
+  if (iconOnly) {
+    const iconSize = Math.round(size * 0.9);
+    return (
+      <span style={{ fontFamily: font, fontWeight: 700, fontSize: iconSize, lineHeight: 1 }}>
+        <span style={oStyle}>o</span>
+        <style>{keyframes}</style>
+      </span>
+    );
+  }
 
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox={viewBoxStr}
-      width={width}
-      height={height}
-      style={{ display: 'block', flexShrink: 0 }}
-    >
-      {/* Background */}
-      {!bare && <rect width="450" height="120" fill="#0A111F" />}
-
-      {/* Typography: "St" */}
-      <text
-        x="64"
-        y="80"
-        fontFamily="'Inter', 'Circular', 'Helvetica Neue', sans-serif"
-        fontWeight="600"
-        fontSize="56"
-        letterSpacing="1"
-        fill="#F4F5F7"
-      >
-        St
-      </text>
-
-      {/* The geometric "o" eye/graph element
-          - Lifted Y to 64 to perfect baseline alignment
-          - Broadened radius
-          - Tuned stroke down slightly so the inner gap breathes better
-      */}
-      <g transform="translate(148, 64)">
-        {/* Outer Circular Stroke: Much more generous inner space (radius 15.5) */}
-        <circle cx="0" cy="0" r="15.5" fill="none" stroke="#F4F5F7" strokeWidth="6" />
-
-        {/* Internal Graph Line: Smooth upward curve, 3 points. Taller amplitude. */}
-        <path
-          d="M -7 4 L -2 -1 L 2 3 L 8 -6"
-          fill="none"
-          stroke="#00FF88"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-
-        {/* Internal Pupil Dot: Sharp center */}
-        <circle cx="0" cy="0" r="2" fill="#00FF88" />
-      </g>
-
-      {/* Typography: "ckeye" */}
-      <text
-        x="172"
-        y="80"
-        fontFamily="'Inter', 'Circular', 'Helvetica Neue', sans-serif"
-        fontWeight="600"
-        fontSize="56"
-        letterSpacing="1"
-        fill="#F4F5F7"
-      >
-        ckeye
-      </text>
-    </svg>
+    <span style={{
+      fontFamily: font,
+      fontWeight: 700,
+      fontSize,
+      color: textColor,
+      lineHeight: 1,
+      letterSpacing: '-0.02em',
+      display: 'inline-block',
+    }}>
+      St<span style={oStyle}>o</span>ckeye
+      <style>{keyframes}</style>
+    </span>
   );
 }

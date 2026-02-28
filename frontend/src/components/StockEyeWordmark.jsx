@@ -11,7 +11,7 @@ export default function StockEyeWordmark({ width = 300 }) {
   const uid = React.useId().replace(/:/g, '');
   const height = Math.round(width * (400 / 1200));
 
-  const font = "'Neue Haas Grotesk Display','Helvetica Neue','Suisse Intl','Aktiv Grotesk',Helvetica,Arial,sans-serif";
+  const font = "'Nunito', 'Google Sans', 'Helvetica Neue', system-ui, sans-serif";
   const lt   = `url(#lt-${uid})`;
   const eye  = `url(#eye-${uid})`;
   const glow = `url(#glow-${uid})`;
@@ -86,11 +86,11 @@ export default function StockEyeWordmark({ width = 300 }) {
       </defs>
 
       {/* ── "ST" ── */}
-      <text x="225" y="240" fontFamily={font} fontWeight="500" fontSize="112" letterSpacing="5"
+      <text x="225" y="240" fontFamily={font} fontWeight="700" fontSize="112" letterSpacing="5"
         fill={lt} textRendering="geometricPrecision">ST</text>
 
       {/* ── "CKEYE" ── */}
-      <text x="510" y="240" fontFamily={font} fontWeight="500" fontSize="112" letterSpacing="5"
+      <text x="510" y="240" fontFamily={font} fontWeight="700" fontSize="112" letterSpacing="5"
         fill={lt} textRendering="geometricPrecision">CKEYE</text>
 
       {/* ── Geometric eye (replaces O) ── */}
