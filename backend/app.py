@@ -607,14 +607,23 @@ def chat(user_id):
 @app.route('/api/chat/history', methods=['GET'])
 @require_auth
 def chat_history(user_id):
-    """Get chat history from the most recent conversation."""
-    limit = request.args.get('limit', 50, type=int)
+    """Get chat history — all messages across all conversations, oldest first."""
+    limit = request.args.get('limit', 200, type=int)
     convs = get_conversations(user_id)
     if not convs:
-        return jsonify({'messages': []})
+        return jsonify({'messages': [], 'conversation_id': None})
+    # Merge messages from all conversations in chronological order so the
+    # user sees their full history, not just the last conversation.
+    all_messages = []
+    for conv in convs:
+        msgs = get_messages(user_id, conv['id'], limit=limit)
+        all_messages.extend(msgs)
+    # Sort by created_at ascending and trim to limit
+    all_messages.sort(key=lambda m: m.get('created_at', ''))
+    all_messages = all_messages[-limit:]
+    # Return the most-recent conversation_id so the frontend can continue it
     latest_cid = convs[0]['id']
-    history = get_messages(user_id, latest_cid, limit=limit)
-    return jsonify({'messages': history})
+    return jsonify({'messages': all_messages, 'conversation_id': latest_cid})
 
 
 @app.route('/api/chat/clear', methods=['POST'])

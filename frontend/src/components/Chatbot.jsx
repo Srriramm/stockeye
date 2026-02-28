@@ -18,6 +18,7 @@ const QUICK_QUESTIONS = [
 
 export default function Chatbot({ apiUrl }) {
   const [messages, setMessages] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [showQuickQuestions, setShowQuickQuestions] = useState(true);
@@ -30,10 +31,13 @@ export default function Chatbot({ apiUrl }) {
 
   const fetchHistory = async () => {
     try {
-      const res = await authAxios.get(`${apiUrl}/api/chat/history?limit=50`);
+      const res = await authAxios.get(`${apiUrl}/api/chat/history?limit=200`);
       if (res.data.messages?.length > 0) {
         setMessages(res.data.messages.map(m => ({ role: m.role, content: m.content, timestamp: m.created_at })));
         setShowQuickQuestions(false);
+      }
+      if (res.data.conversation_id) {
+        setConversationId(res.data.conversation_id);
       }
     } catch { }
   };
@@ -46,7 +50,13 @@ export default function Chatbot({ apiUrl }) {
     setMessages(prev => [...prev, { role: 'user', content: msg, timestamp: new Date().toISOString() }]);
     setLoading(true);
     try {
-      const res = await authAxios.post(`${apiUrl}/api/chat`, { message: msg, provider: preferredProvider }, { timeout: 65000 });
+      const res = await authAxios.post(
+        `${apiUrl}/api/chat`,
+        { message: msg, provider: preferredProvider, conversation_id: conversationId },
+        { timeout: 65000 }
+      );
+      // Persist the conversation_id so all messages go into the same conversation
+      if (res.data.conversation_id) setConversationId(res.data.conversation_id);
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: res.data.response,
@@ -73,6 +83,7 @@ export default function Chatbot({ apiUrl }) {
     try {
       await authAxios.post(`${apiUrl}/api/chat/clear`);
       setMessages([]);
+      setConversationId(null);
       setShowQuickQuestions(true);
       toast.success('Conversation cleared');
     } catch { toast.error('Failed to clear'); }
