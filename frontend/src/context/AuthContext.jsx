@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { authAxios } from '../utils/api';
 
@@ -32,9 +33,25 @@ export function AuthProvider({ children }) {
     };
 
     useEffect(() => {
-        const fetchUserMeta = async (isBackground = false) => {
+        // directToken: when provided (from onAuthStateChange), bypasses the authAxios
+        // interceptor which calls supabase.auth.getSession() and can deadlock on
+        // Supabase's internal refresh lock (_recoverAndRefresh holds the lock while
+        // onAuthStateChange is firing, causing getSession() to wait → 8 s timeout →
+        // request sent without auth header → 401 → status set to 'rejected').
+        const fetchUserMeta = async (isBackground = false, directToken = null) => {
             try {
-                const { data } = await authAxios.get(`${API_URL}/api/auth/me`);
+                let data;
+                if (directToken) {
+                    // Bypass the interceptor entirely — token is already in hand
+                    const res = await axios.get(`${API_URL}/api/auth/me`, {
+                        headers: { Authorization: `Bearer ${directToken}` },
+                        timeout: 30000,
+                    });
+                    data = res.data;
+                } else {
+                    const res = await authAxios.get(`${API_URL}/api/auth/me`);
+                    data = res.data;
+                }
                 setUserRole(data.role);
                 setUserStatus(data.status);
             } catch (err) {
@@ -76,7 +93,9 @@ export function AuthProvider({ children }) {
                 setSession(s);
                 setUser(s?.user ?? null);
                 if (s) {
-                    await fetchUserMeta();
+                    // Pass the token directly — avoids calling getSession() inside
+                    // the auth callback which deadlocks on Supabase's refresh lock
+                    await fetchUserMeta(false, s.access_token);
                 } else if (_event === 'SIGNED_OUT') {
                     // Only clear cached status on explicit sign-out, not on
                     // transient null-session events during token refresh
