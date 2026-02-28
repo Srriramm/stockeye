@@ -30,7 +30,7 @@ export default function PortfolioEnhanced({ apiUrl, socket }) {
   const [sortAsc, setSortAsc] = useState(false);
 
   useEffect(() => {
-    axios.post(`${apiUrl}/api/monitor/service`, { action: 'start' }).catch(() => { });
+    authAxios.post(`${apiUrl}/api/monitor/service`, { action: 'start' }).catch(() => { });
   }, [apiUrl]);
 
   const fetchPortfolio = useCallback(async () => {

@@ -1034,9 +1034,10 @@ def monitored_stocks_list(user_id):
 
 
 @app.route('/api/monitor/service', methods=['POST'])
-def control_monitor_service():
+@require_auth
+def control_monitor_service(user_id):
     """Start or stop the monitoring service."""
-    data = request.json
+    data = request.json or {}
     action = data.get('action', 'start')
 
     if action == 'start':
