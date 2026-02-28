@@ -52,7 +52,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./ssl/certs:/etc/nginx/ssl:ro    # TLS certs — see deployment guide below
+      - /etc/letsencrypt:/etc/letsencrypt:ro    # Let's Encrypt certs from host
     depends_on:
       backend:
         condition: service_healthy
