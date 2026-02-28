@@ -624,9 +624,13 @@ def chat(user_id):
 @app.route('/api/chat/history', methods=['GET'])
 @require_auth
 def chat_history(user_id):
-    """Get chat history."""
+    """Get chat history from the most recent conversation."""
     limit = request.args.get('limit', 50, type=int)
-    history = get_chat_history(user_id, limit)
+    convs = get_conversations(user_id)
+    if not convs:
+        return jsonify({'messages': []})
+    latest_cid = convs[0]['id']
+    history = get_messages(user_id, latest_cid, limit=limit)
     return jsonify({'messages': history})
 
 
