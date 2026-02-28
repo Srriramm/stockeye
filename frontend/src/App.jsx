@@ -469,9 +469,9 @@ function AppShell() {
             <Route path="/screener" element={<ScreenerPage apiUrl={API_URL} />} />
             <Route path="/heatmap" element={<HeatmapPage />} />
             <Route path="/watchlist" element={<Watchlist apiUrl={API_URL} />} />
-            <Route path="/portfolio" element={<Portfolio apiUrl={API_URL} socket={socket} />} />
-            <Route path="/chat" element={<Chatbot apiUrl={API_URL} socket={socket} />} />
-            <Route path="/monitor" element={<MarketMonitor apiUrl={API_URL} socket={socket} alerts={alerts} />} />
+            <Route path="/portfolio" element={<Portfolio apiUrl={API_URL} socket={wsManager.socket} />} />
+            <Route path="/chat" element={<Chatbot apiUrl={API_URL} socket={wsManager.socket} />} />
+            <Route path="/monitor" element={<MarketMonitor apiUrl={API_URL} socket={wsManager.socket} alerts={alerts} />} />
             <Route path="/admin" element={
               <AdminRoute><AdminDashboard apiUrl={API_URL} /></AdminRoute>
             } />
