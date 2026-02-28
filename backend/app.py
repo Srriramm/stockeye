@@ -54,8 +54,8 @@ from user_manager import (
 )
 from conversation_manager import (
     create_conversation, get_conversations, get_conversation,
-    rename_conversation, delete_conversation, add_message,
-    get_messages, get_or_create_conversation
+    rename_conversation, delete_conversation, delete_all_conversations,
+    add_message, get_messages, get_or_create_conversation, get_all_user_messages
 )
 from stock_data import (
     get_stock_price, get_stock_info, get_historical_data,
@@ -609,29 +609,15 @@ def chat(user_id):
 def chat_history(user_id):
     """Get chat history — all messages across all conversations, oldest first."""
     limit = request.args.get('limit', 200, type=int)
-    convs = get_conversations(user_id)
-    if not convs:
-        return jsonify({'messages': [], 'conversation_id': None})
-    # Merge messages from all conversations in chronological order.
-    # get_conversations() returns newest-first, so iterate reversed (oldest-first)
-    # so the combined list is in ascending time order (oldest at top, newest at bottom).
-    all_messages = []
-    for conv in reversed(convs):
-        msgs = get_messages(user_id, conv['id'], limit=limit)
-        all_messages.extend(msgs)
-    all_messages = all_messages[-limit:]
-    # Return the most-recent conversation_id so the frontend can continue it
-    latest_cid = convs[0]['id']
-    return jsonify({'messages': all_messages, 'conversation_id': latest_cid})
+    msgs, latest_cid = get_all_user_messages(user_id, limit=limit)
+    return jsonify({'messages': msgs, 'conversation_id': latest_cid})
 
 
 @app.route('/api/chat/clear', methods=['POST'])
 @require_auth
 def clear_chat(user_id):
     """Clear chat history — delete all conversations for this user."""
-    convs = get_conversations(user_id)
-    for c in convs:
-        delete_conversation(user_id, c['id'])
+    delete_all_conversations(user_id)
     return jsonify({'status': 'cleared'})
 
 

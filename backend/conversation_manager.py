@@ -77,6 +77,16 @@ def delete_conversation(user_id: str, conversation_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def delete_all_conversations(user_id: str) -> int:
+    """Delete all conversations (and their messages) for a user. Returns rows deleted."""
+    with get_db_connection() as conn:
+        cur = conn.execute(
+            'DELETE FROM conversations WHERE user_id = ?',
+            (user_id,)
+        )
+        return cur.rowcount
+
+
 # ─── Messages ────────────────────────────────────────────────────
 
 def add_message(user_id: str, conversation_id: int, role: str, content: str) -> int:
@@ -104,6 +114,34 @@ def get_messages(user_id: str, conversation_id: int, limit: int = 50) -> list:
             ORDER BY created_at DESC LIMIT ?
         ''', (conversation_id, user_id, limit)).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+
+def get_all_user_messages(user_id: str, limit: int = 200) -> tuple[list, int | None]:
+    """
+    Fetch recent messages for a user across ALL conversations in a single query.
+    Returns (messages, latest_conversation_id).
+    Messages are in ascending time order (oldest first, newest last).
+    """
+    with get_db_connection() as conn:
+        # Get the most-recent conversation_id in one shot
+        latest = conn.execute(
+            'SELECT id FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1',
+            (user_id,)
+        ).fetchone()
+        if not latest:
+            return [], None
+        latest_cid = latest['id'] if isinstance(latest, dict) else latest[0]
+
+        # Fetch all messages in one query, oldest first, capped at limit
+        rows = conn.execute('''
+            SELECT role, content
+            FROM conversation_messages
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+        ''', (user_id,)).fetchall()
+        msgs = [dict(r) for r in rows]
+        # Keep only the most recent `limit` messages
+        return msgs[-limit:], latest_cid
 
 
 def get_or_create_conversation(user_id: str, conversation_id: int | None = None) -> int:
