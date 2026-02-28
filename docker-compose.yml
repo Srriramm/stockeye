@@ -51,8 +51,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    volumes:
-      - /etc/letsencrypt:/etc/letsencrypt:ro    # Let's Encrypt certs from host
+    volumes: []
     depends_on:
       backend:
         condition: service_healthy
