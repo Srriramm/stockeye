@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import StockEyeLogo from './StockEyeLogo';
+import StockEyeWordmark from './StockEyeWordmark';
 
 export default function LoginPage() {
     const { signInWithGoogle, isAuthenticated, loading } = useAuth();
@@ -43,12 +43,8 @@ export default function LoginPage() {
             <div style={styles.card}>
                 {/* Logo & Brand */}
                 <div style={styles.logoSection}>
-                    <div style={styles.logoContainer}>
-                        <StockEyeLogo size={64} />
-                        <div style={styles.logoPulse} />
-                    </div>
-                    <h1 style={styles.brandName}>StockEye</h1>
-                    <p style={styles.brandTagline}>AI-Powered Stock Intelligence</p>
+                    <StockEyeWordmark width={260} variant="light" />
+                    <p style={{ ...styles.brandTagline, marginTop: 10 }}>AI-Powered Stock Intelligence</p>
                 </div>
 
                 {/* Divider */}
