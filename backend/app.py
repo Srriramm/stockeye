@@ -637,8 +637,10 @@ def chat_history(user_id):
 @app.route('/api/chat/clear', methods=['POST'])
 @require_auth
 def clear_chat(user_id):
-    """Clear chat history for the authenticated user."""
-    clear_chat_history(user_id)
+    """Clear chat history — delete all conversations for this user."""
+    convs = get_conversations(user_id)
+    for c in convs:
+        delete_conversation(user_id, c['id'])
     return jsonify({'status': 'cleared'})
 
 

@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Shield } from 'lucide-react';
 import StockEyeLogo from './components/StockEyeLogo';
-import io from 'socket.io-client';
 import axios from 'axios';
 import { authAxios } from './utils/api';
 import { ToastContainer } from 'react-toastify';
@@ -25,9 +24,6 @@ import wsManager from './utils/websocket';
 import * as apiCache from './utils/apiCache';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
-
-// autoConnect: false — we connect manually after getting the auth token
-const socket = io(API_URL, { autoConnect: false, transports: ['websocket', 'polling'], reconnection: true, reconnectionDelay: 1000 });
 
 /* ─── Shared loading spinner ────────────────────────────── */
 function LoadingSpinner() {
@@ -161,42 +157,35 @@ function AppShell() {
   const [marketNews, setMarketNews] = useState(apiCache.get('marketNews') || null);
 
   useEffect(() => {
-    socket.on('connect', () => setConnected(true));
-    socket.on('disconnect', () => setConnected(false));
-    socket.on('new_alert', (alert) => {
-      setAlerts(prev => [alert, ...prev].slice(0, 50));
-      setUnreadAlerts(prev => prev + 1);
-    });
-
-    // Connect sockets with the Supabase access token so the server can auth the WS handshake
     supabase.auth.getSession().then(({ data: { session } }) => {
-      const token = session?.access_token;
-      if (token) {
-        socket.io.opts.query = { token };
-        wsManager.connect(API_URL, token);
-      }
-      socket.connect();
+      if (!session?.access_token) return;
+      wsManager.connect(API_URL, session.access_token);
+      const s = wsManager.socket;
+      if (!s) return;
+      s.on('connect', () => setConnected(true));
+      s.on('disconnect', () => setConnected(false));
+      s.on('new_alert', (alert) => {
+        setAlerts(prev => [alert, ...prev].slice(0, 50));
+        setUnreadAlerts(prev => prev + 1);
+      });
     });
 
     return () => {
-      socket.off('connect');
-      socket.off('disconnect');
-      socket.off('new_alert');
       wsManager.disconnect();
     };
   }, []);
 
   useEffect(() => {
     const fetchGlobal = async () => {
-      try {
-        const [alertsRes, indicesRes] = await Promise.all([
-          authAxios.get(`${API_URL}/api/alerts?hours=24`),
-          axios.get(`${API_URL}/api/market/overview`),
-        ]);
-        setAlerts(alertsRes.data.alerts || []);
-        setIndices(indicesRes.data.indices || {});
-      } catch (err) {
-        console.log('Backend not connected yet');
+      const [alertsResult, indicesResult] = await Promise.allSettled([
+        authAxios.get(`${API_URL}/api/alerts?hours=24`),
+        axios.get(`${API_URL}/api/market/overview`),
+      ]);
+      if (alertsResult.status === 'fulfilled') {
+        setAlerts(alertsResult.value.data.alerts || []);
+      }
+      if (indicesResult.status === 'fulfilled') {
+        setIndices(indicesResult.value.data.indices || {});
       }
     };
     fetchGlobal();

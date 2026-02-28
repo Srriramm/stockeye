@@ -32,15 +32,18 @@ export function AuthProvider({ children }) {
     };
 
     useEffect(() => {
-        const fetchUserMeta = async () => {
+        const fetchUserMeta = async (isBackground = false) => {
             try {
                 const { data } = await authAxios.get(`${API_URL}/api/auth/me`);
                 setUserRole(data.role);
                 setUserStatus(data.status);
             } catch (err) {
                 console.error('Failed to fetch user meta:', err);
-                setUserRole('user');
-                setUserStatus('rejected');
+                // On background refresh, keep cached values — don't reject on network hiccup
+                if (!isBackground) {
+                    setUserRole('user');
+                    setUserStatus('rejected');
+                }
             }
         };
 
@@ -54,9 +57,9 @@ export function AuthProvider({ children }) {
                     // and refresh in the background
                     if (sessionStorage.getItem(SK_STATUS)) {
                         setLoading(false);
-                        fetchUserMeta();   // background refresh — no await
+                        fetchUserMeta(true);   // background refresh — don't clear on error
                     } else {
-                        await fetchUserMeta();
+                        await fetchUserMeta(false);
                         setLoading(false);
                     }
                 } else {
