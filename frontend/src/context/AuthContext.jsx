@@ -6,12 +6,30 @@ const AuthContext = createContext(null);
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
+// sessionStorage keys — cleared on sign-out
+const SK_STATUS = 'se_user_status';
+const SK_ROLE   = 'se_user_role';
+
 export function AuthProvider({ children }) {
-    const [user, setUser] = useState(null);
+    const [user, setUser]       = useState(null);
     const [session, setSession] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [userRole, setUserRole] = useState(null);    // 'user' | 'admin'
-    const [userStatus, setUserStatus] = useState(null); // 'approved' | 'rejected' | 'suspended'
+
+    // Seed from sessionStorage so there's no spinner flash on page reload
+    const [userRole,   setUserRoleState]   = useState(() => sessionStorage.getItem(SK_ROLE)   || null);
+    const [userStatus, setUserStatusState] = useState(() => sessionStorage.getItem(SK_STATUS) || null);
+
+    // Wrappers that keep sessionStorage in sync
+    const setUserRole = (v) => {
+        setUserRoleState(v);
+        if (v) sessionStorage.setItem(SK_ROLE, v);
+        else    sessionStorage.removeItem(SK_ROLE);
+    };
+    const setUserStatus = (v) => {
+        setUserStatusState(v);
+        if (v) sessionStorage.setItem(SK_STATUS, v);
+        else    sessionStorage.removeItem(SK_STATUS);
+    };
 
     useEffect(() => {
         const fetchUserMeta = async () => {
@@ -22,23 +40,30 @@ export function AuthProvider({ children }) {
             } catch (err) {
                 console.error('Failed to fetch user meta:', err);
                 setUserRole('user');
-                setUserStatus('rejected');   // treat backend error as rejected — avoids infinite spinner
+                setUserStatus('rejected');
             }
         };
 
-        // Get initial session, then fetch user meta
         const init = async () => {
             const { data: { session: s } } = await supabase.auth.getSession();
             setSession(s);
             setUser(s?.user ?? null);
             if (s) {
-                await fetchUserMeta();
+                // If we already have a cached status, unblock the UI immediately
+                // and refresh in the background
+                if (sessionStorage.getItem(SK_STATUS)) {
+                    setLoading(false);
+                    fetchUserMeta();   // background refresh — no await
+                } else {
+                    await fetchUserMeta();
+                    setLoading(false);
+                }
+            } else {
+                setLoading(false);
             }
-            setLoading(false);
         };
         init();
 
-        // Listen for auth changes (login, logout, token refresh)
         const { data: { subscription } } = supabase.auth.onAuthStateChange(
             async (_event, s) => {
                 setSession(s);
@@ -69,6 +94,9 @@ export function AuthProvider({ children }) {
     const signOut = async () => {
         const { error } = await supabase.auth.signOut();
         if (error) throw error;
+        // Clear cached status on explicit sign-out
+        sessionStorage.removeItem(SK_STATUS);
+        sessionStorage.removeItem(SK_ROLE);
     };
 
     const getAccessToken = async () => {
