@@ -169,6 +169,11 @@ def _deduplicate(articles):
 def fetch_stock_news(ticker, days=7, max_articles=10):
     """Fetch recent news for a specific stock using News API."""
     ticker = ticker.upper()
+    # Strip exchange suffix so TCS.NS looks up the same as TCS
+    for _sfx in ('.NS', '.BO'):
+        if ticker.endswith(_sfx):
+            ticker = ticker[:-len(_sfx)]
+            break
     cache_key = f"news_{ticker}"
     cached = _get_news_cached(cache_key)
     if cached:
@@ -259,13 +264,56 @@ def fetch_market_news(max_articles=15):
             print(f"Market news error: {e}")
 
     if not articles:
-        articles = _fetch_google_news_rss('Indian stock market NIFTY SENSEX', 'MARKET')
+        articles = _fetch_indian_market_news_rss(max_articles)
 
     # ── AI-classify all headlines in ONE call ───────────────────────────────
     _enrich_with_ai_sentiment(articles)
 
     _set_news_cached(cache_key, articles)
     return articles
+
+
+def _fetch_indian_market_news_rss(max_articles=15):
+    """Fetch Indian stock market news from reliable financial RSS feeds."""
+    # Dedicated Indian financial news RSS feeds (more reliable than Google News RSS)
+    FEED_URLS = [
+        ('Economic Times Markets', 'https://economictimes.indiatimes.com/markets/stocks/rss.cms'),
+        ('Moneycontrol', 'https://www.moneycontrol.com/rss/latestnews.xml'),
+        ('Business Standard', 'https://www.business-standard.com/rss/markets-106.rss'),
+        ('LiveMint Markets', 'https://www.livemint.com/rss/markets'),
+    ]
+    articles = []
+    try:
+        from bs4 import BeautifulSoup
+        for source_name, feed_url in FEED_URLS:
+            if len(articles) >= max_articles:
+                break
+            try:
+                resp = requests.get(feed_url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
+                if resp.status_code != 200:
+                    continue
+                soup = BeautifulSoup(resp.content, 'xml')
+                items = soup.find_all('item')[:6]
+                for item in items:
+                    title = item.title.get_text(strip=True) if item.title else ''
+                    description = item.description.get_text(strip=True)[:200] if item.description else ''
+                    link = item.link.get_text(strip=True) if item.link else ''
+                    pub_date = item.pubDate.get_text(strip=True) if item.pubDate else ''
+                    if title:
+                        articles.append({
+                            'title': title,
+                            'description': description,
+                            'url': link,
+                            'source': source_name,
+                            'published_at': pub_date,
+                            'sentiment': 'neutral',
+                        })
+            except Exception as e:
+                logger.debug(f"RSS feed error ({source_name}): {e}")
+                continue
+    except Exception as e:
+        logger.error(f"Indian market RSS fetch error: {e}")
+    return articles[:max_articles]
 
 
 def _fetch_google_news_rss(query, ticker):

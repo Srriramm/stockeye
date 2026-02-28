@@ -194,10 +194,15 @@ def enforce_beta_access():
 import re
 
 def validate_ticker(ticker):
-    """Validate Indian stock ticker format."""
+    """Validate Indian stock ticker format. Strips .NS/.BO exchange suffixes."""
     if not ticker or not isinstance(ticker, str):
         raise ValueError("Ticker is required")
     ticker = ticker.upper().strip()
+    # Strip exchange suffixes (.NS, .BO) so both TCS and TCS.NS are accepted
+    for suffix in ('.NS', '.BO'):
+        if ticker.endswith(suffix):
+            ticker = ticker[:-len(suffix)]
+            break
     if not re.match(r'^[A-Z]{2,10}$', ticker):
         raise ValueError(f"Invalid ticker format: {ticker}")
     return ticker
