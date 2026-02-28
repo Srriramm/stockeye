@@ -416,8 +416,8 @@ def get_market_indices():
             _set_cached(cache_key, redis_hit)
             return redis_hit
 
-    results = {}
-    for name, symbol in INDICES.items():
+    def _fetch_one(item):
+        name, symbol = item
         try:
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period='2d')
@@ -426,18 +426,23 @@ def get_market_indices():
                 prev = hist['Close'].iloc[-2] if len(hist) > 1 else current
                 change = current - prev
                 change_pct = (change / prev * 100) if prev > 0 else 0
-                results[name] = {
+                return name, {
                     'value': round(float(current), 2),
                     'change': round(float(change), 2),
                     'change_percent': round(float(change_pct), 2),
                 }
         except Exception as e:
             print(f"Error fetching {name}: {e}")
-            results[name] = {'value': 0, 'change': 0, 'change_percent': 0}
+        return name, {'value': 0, 'change': 0, 'change_percent': 0}
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for name, data in executor.map(_fetch_one, INDICES.items()):
+            results[name] = data
 
     _set_cached(cache_key, results)
     if _redis_cache_available:
-        cache_indices(results, ttl=60)
+        cache_indices(results, ttl=300)
     return results
 
 
