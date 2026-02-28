@@ -220,12 +220,13 @@ Please provide your analysis and advice based on the above real-time data."""
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=messages,
             max_tokens=2000,
             temperature=0.7,
             presence_penalty=0.1,
             frequency_penalty=0.1,
+            timeout=45,
         )
 
         ai_response = response.choices[0].message.content
@@ -335,12 +336,13 @@ Please provide your analysis and advice based on the above real-time data."""
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=messages,
             max_tokens=2000,
             temperature=0.7,
             presence_penalty=0.1,
             frequency_penalty=0.1,
+            timeout=45,
         )
 
         ai_response = response.choices[0].message.content
@@ -348,7 +350,7 @@ Please provide your analysis and advice based on the above real-time data."""
         return {
             'response': ai_response,
             'provider_used': 'openai',
-            'model_used': 'gpt-4',
+            'model_used': 'gpt-4o',
             'query_type': query_type,
             'tokens_used': response.usage.total_tokens if response.usage else 0,
             'error': None
@@ -360,7 +362,7 @@ Please provide your analysis and advice based on the above real-time data."""
         return {
             'response': _get_fallback_response(user_query),
             'provider_used': 'openai',
-            'model_used': 'gpt-4',
+            'model_used': 'gpt-4o',
             'query_type': query_type,
             'error': f'OpenAI error: {error_msg}'
         }
@@ -372,7 +374,7 @@ def _query_anthropic(user_query, query_type, conversation_history=None, **contex
         conversation_history = []
 
     # Model selection based on query complexity
-    model = "claude-opus-4-6" if query_type == 'deep' else "claude-sonnet-4-5-20250929"
+    model = "claude-sonnet-4-6" if query_type == 'deep' else "claude-haiku-4-5-20251001"
     max_tokens = 4000 if query_type == 'deep' else 2000
 
     # Prepare context
@@ -408,7 +410,8 @@ Please provide your analysis and advice based on the above real-time data."""
             max_tokens=max_tokens,
             temperature=0.7,
             system=SYSTEM_PROMPT,
-            messages=messages
+            messages=messages,
+            timeout=45,
         )
 
         ai_response = response.content[0].text
