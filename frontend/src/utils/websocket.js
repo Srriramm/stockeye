@@ -19,7 +19,7 @@ class WebSocketManager {
    * Initialize WebSocket connection
    * @param {string} url - Backend WebSocket URL
    */
-  connect(url = 'http://localhost:5000', token = null) {
+  connect(url = window.location.origin, token = null) {
     if (this.socket && this.connected) {
       console.log('[WS] Already connected');
       return;
