@@ -31,7 +31,7 @@ export async function getAuthHeaders() {
  * Axios instance with a request interceptor that auto-attaches the Bearer token.
  * Use this instead of bare `axios` for any authenticated backend call.
  */
-export const authAxios = axios.create({ timeout: 8000 });
+export const authAxios = axios.create({ timeout: 30000 });
 
 authAxios.interceptors.request.use(async (config) => {
     const headers = await getAuthHeaders();
