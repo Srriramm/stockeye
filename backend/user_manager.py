@@ -92,13 +92,28 @@ def ensure_user_registered(user_id: str, email: str,
         ).fetchone()
 
         if existing:
-            conn.execute(
-                'UPDATE app_users SET last_seen_at = CURRENT_TIMESTAMP, '
-                'full_name = COALESCE(?, full_name), '
-                'avatar_url = COALESCE(?, avatar_url) '
-                'WHERE user_id = ?',
-                (full_name, avatar_url, user_id)
-            )
+            # Re-check admin status on every login so adding ADMIN_USER_IDS
+            # to .env promotes already-registered users without manual SQL.
+            if user_id in ADMIN_USER_IDS and (
+                existing['role'] != 'admin' or existing['status'] != 'approved'
+            ):
+                conn.execute(
+                    "UPDATE app_users SET role = 'admin', status = 'approved', "
+                    'last_seen_at = CURRENT_TIMESTAMP, '
+                    'full_name = COALESCE(?, full_name), '
+                    'avatar_url = COALESCE(?, avatar_url) '
+                    'WHERE user_id = ?',
+                    (full_name, avatar_url, user_id)
+                )
+                logger.info(f"Admin bootstrap: promoted existing user {email} to admin/approved")
+            else:
+                conn.execute(
+                    'UPDATE app_users SET last_seen_at = CURRENT_TIMESTAMP, '
+                    'full_name = COALESCE(?, full_name), '
+                    'avatar_url = COALESCE(?, avatar_url) '
+                    'WHERE user_id = ?',
+                    (full_name, avatar_url, user_id)
+                )
             row = conn.execute(
                 'SELECT * FROM app_users WHERE user_id = ?', (user_id,)
             ).fetchone()
