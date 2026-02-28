@@ -66,7 +66,7 @@ export default function Dashboard({ indices, alerts, apiUrl, movers: propMovers,
     if (!n && n !== 0) return '—';
     if (Math.abs(n) >= 1e7) return `₹${(n / 1e7).toFixed(2)}Cr`;
     if (Math.abs(n) >= 1e5) return `₹${(n / 1e5).toFixed(2)}L`;
-    return `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+    return `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
   const sectorData = portfolio?.holdings ? Object.entries(
