@@ -9,6 +9,17 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
+# eventlet.Timeout is the only reliable way to interrupt blocking I/O in the
+# eventlet green-thread world. httpx's own timeout doesn't always fire because
+# eventlet patches low-level sockets but not httpx's internal async machinery.
+try:
+    import eventlet
+    _EVENTLET_AVAILABLE = True
+except ImportError:
+    _EVENTLET_AVAILABLE = False
+
+AI_TIMEOUT = 50  # seconds — hard wall for any single AI API call
+
 logger = logging.getLogger(__name__)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
@@ -219,15 +230,22 @@ Please provide your analysis and advice based on the above real-time data."""
     messages.append({"role": "user", "content": user_message})
 
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=2000,
-            temperature=0.7,
-            presence_penalty=0.1,
-            frequency_penalty=0.1,
-            timeout=45,
-        )
+        def _call():
+            return openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=2000,
+                temperature=0.7,
+                presence_penalty=0.1,
+                frequency_penalty=0.1,
+                timeout=45,
+            )
+
+        if _EVENTLET_AVAILABLE:
+            with eventlet.Timeout(AI_TIMEOUT):
+                response = _call()
+        else:
+            response = _call()
 
         ai_response = response.choices[0].message.content
 
@@ -335,15 +353,22 @@ Please provide your analysis and advice based on the above real-time data."""
     messages.append({"role": "user", "content": user_message})
 
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=2000,
-            temperature=0.7,
-            presence_penalty=0.1,
-            frequency_penalty=0.1,
-            timeout=45,
-        )
+        def _call():
+            return openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=2000,
+                temperature=0.7,
+                presence_penalty=0.1,
+                frequency_penalty=0.1,
+                timeout=45,
+            )
+
+        if _EVENTLET_AVAILABLE:
+            with eventlet.Timeout(AI_TIMEOUT):
+                response = _call()
+        else:
+            response = _call()
 
         ai_response = response.choices[0].message.content
 
@@ -405,14 +430,21 @@ Please provide your analysis and advice based on the above real-time data."""
     messages.append({"role": "user", "content": user_message})
 
     try:
-        response = anthropic_client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=0.7,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-            timeout=45,
-        )
+        def _call():
+            return anthropic_client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=0.7,
+                system=SYSTEM_PROMPT,
+                messages=messages,
+                timeout=45,
+            )
+
+        if _EVENTLET_AVAILABLE:
+            with eventlet.Timeout(AI_TIMEOUT):
+                response = _call()
+        else:
+            response = _call()
 
         ai_response = response.content[0].text
 

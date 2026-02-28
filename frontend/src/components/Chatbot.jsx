@@ -46,7 +46,7 @@ export default function Chatbot({ apiUrl }) {
     setMessages(prev => [...prev, { role: 'user', content: msg, timestamp: new Date().toISOString() }]);
     setLoading(true);
     try {
-      const res = await authAxios.post(`${apiUrl}/api/chat`, { message: msg, provider: preferredProvider }, { timeout: 60000 });
+      const res = await authAxios.post(`${apiUrl}/api/chat`, { message: msg, provider: preferredProvider }, { timeout: 65000 });
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: res.data.response,
