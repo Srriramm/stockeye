@@ -51,7 +51,7 @@ function AccessGatePage() {
   const { user, userStatus, signOut } = useAuth();
   const displayName = user?.user_metadata?.full_name || user?.email || 'there';
 
-  const isRejected  = userStatus === 'rejected';
+  const isRejected = userStatus === 'rejected';
   const isSuspended = userStatus === 'suspended';
 
   const handleSignOut = async () => {
@@ -71,12 +71,8 @@ function AccessGatePage() {
       }}>
         {/* Logo */}
         <div style={{ margin: '0 auto 20px', display: 'flex', justifyContent: 'center' }}>
-          <StockEyeLogo size={56} />
+          <StockEyeLogo size={64} bare={true} />
         </div>
-
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: '#0f172a', margin: '0 0 8px' }}>
-          StockEye
-        </h1>
 
         {isSuspended ? (
           <>
@@ -268,20 +264,19 @@ function AppShell() {
           {sidebarOpen ? (
             <div className="flex items-center gap-3 fade-in">
               <div className="relative">
-                <StockEyeLogo size={32} />
+                <StockEyeLogo size={32} bare={true} />
                 <div
                   className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white"
                   style={{ background: connected ? '#10b981' : '#ef4444' }}
                 />
               </div>
               <div>
-                <h1 className="font-bold text-sm tracking-tight" style={{ color: '#0f172a', lineHeight: 1 }}>StockEye</h1>
                 <span className="text-[10px] font-semibold tracking-wider uppercase" style={{ color: '#2563eb' }}>Pro Console</span>
               </div>
             </div>
           ) : (
             <div className="w-full flex justify-center">
-              <StockEyeLogo size={32} />
+              <StockEyeLogo size={32} bare={true} iconOnly={true} />
             </div>
           )}
           <button
