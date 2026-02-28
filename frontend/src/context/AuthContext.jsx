@@ -21,8 +21,8 @@ export function AuthProvider({ children }) {
                 setUserStatus(data.status);
             } catch (err) {
                 console.error('Failed to fetch user meta:', err);
-                setUserRole(null);
-                setUserStatus(null);
+                setUserRole('user');
+                setUserStatus('rejected');   // treat backend error as rejected — avoids infinite spinner
             }
         };
 
