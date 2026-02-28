@@ -128,9 +128,14 @@ function ProtectedRoute({ children }) {
   const { isAuthenticated, userStatus, loading } = useAuth();
   const location = useLocation();
 
+  // Fast path: userStatus is seeded from sessionStorage before any network call.
+  // If already 'approved', show children immediately — backend still validates JWT
+  // on every API call, so this is safe.
+  if (userStatus === 'approved') return children;
+
+  // Slow path: first login or after sign-out, wait for auth round-trip.
   if (loading) return <LoadingSpinner />;
   if (!isAuthenticated) return <Navigate to="/login" state={{ from: location }} replace />;
-  if (userStatus === 'approved') return children;
   return <AccessGatePage />;
 }
 
