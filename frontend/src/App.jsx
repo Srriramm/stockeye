@@ -130,7 +130,9 @@ function ProtectedRoute({ children }) {
   if (userStatus === 'approved') return children;
 
   // Slow path: first login or after sign-out, wait for auth round-trip.
-  if (loading) return <LoadingSpinner />;
+  // Also show spinner while authenticated but status hasn't loaded yet (first login:
+  // INITIAL_SESSION sets loading=false before init()'s fetchUserMeta() completes).
+  if (loading || (isAuthenticated && userStatus === null)) return <LoadingSpinner />;
   if (!isAuthenticated) return <Navigate to="/login" state={{ from: location }} replace />;
   return <AccessGatePage />;
 }
