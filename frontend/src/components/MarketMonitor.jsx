@@ -138,7 +138,6 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
     }, 4000);
 
     return () => { if (profilePollRef.current) { clearInterval(profilePollRef.current); profilePollRef.current = null; } };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stockProfiles, apiUrl]);
 
   const searchStocks = async (query) => {
