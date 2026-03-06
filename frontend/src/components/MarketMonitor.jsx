@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Activity, Eye, Bell, Search, RefreshCw, Trash2, ArrowUpRight, ArrowDownRight, Target, TrendingUp, X, Newspaper, ChevronDown, ChevronUp } from 'lucide-react';
+import { Activity, Eye, Bell, Search, RefreshCw, Trash2, ArrowUpRight, ArrowDownRight, Target, TrendingUp, X, Newspaper, ChevronDown, ChevronUp, Brain, Zap } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer } from 'recharts';
 import axios from 'axios';
 import { authAxios } from '../utils/api';
@@ -17,6 +17,7 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
   const [stockHistories, setStockHistories] = useState({});
   const [stockSignals, setStockSignals] = useState({});   // { TICKER: { signal, score, rsi, ... } }
   const [stockNews, setStockNews] = useState({});          // { TICKER: [articles] }
+  const [stockProfiles, setStockProfiles] = useState({});  // { TICKER: profile }
   const [expandedStock, setExpandedStock] = useState(null); // ticker whose news panel is open
   const [newsLoading, setNewsLoading] = useState({});       // { TICKER: bool }
 
@@ -39,17 +40,22 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
           } catch { }
         }
 
-        // Fetch quick signals in parallel for all monitored stocks
-        const signalResults = await Promise.allSettled(
-          stocks.map(s => axios.get(`${apiUrl}/api/stocks/${s.ticker}/quick-signal`))
-        );
+        // Fetch quick signals + intelligence profiles in parallel for all monitored stocks
+        const [signalResults, profileResults] = await Promise.all([
+          Promise.allSettled(stocks.map(s => axios.get(`${apiUrl}/api/stocks/${s.ticker}/quick-signal`))),
+          Promise.allSettled(stocks.map(s => axios.get(`${apiUrl}/api/stocks/${s.ticker}/intelligence?name=${encodeURIComponent(s.name || '')}`))),
+        ]);
         const signals = {};
         signalResults.forEach((res, i) => {
-          if (res.status === 'fulfilled') {
-            signals[stocks[i].ticker] = res.value.data;
-          }
+          if (res.status === 'fulfilled') signals[stocks[i].ticker] = res.value.data;
         });
         setStockSignals(prev => ({ ...prev, ...signals }));
+
+        const profiles = {};
+        profileResults.forEach((res, i) => {
+          if (res.status === 'fulfilled') profiles[stocks[i].ticker] = res.value.data;
+        });
+        setStockProfiles(prev => ({ ...prev, ...profiles }));
       }
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value.data.alerts || []);
       if (newsRes.status === 'fulfilled') setNews(newsRes.value.data.news || []);
@@ -227,6 +233,7 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
                 const isExpanded = expandedStock === stock.ticker;
                 const articles = stockNews[stock.ticker] || [];
                 const loadingNews = newsLoading[stock.ticker];
+                const profile = stockProfiles[stock.ticker];
 
                 return (
                   <div key={stock.ticker} className="rounded-xl overflow-hidden transition-all" style={{ background: '#ffffff', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
@@ -284,6 +291,33 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
                         </ResponsiveContainer>
                       )}
 
+                      {/* Intelligence context strip */}
+                      {profile && (
+                        <div className="mt-3 rounded-lg px-3 py-2" style={{ background: '#f1f5f9', border: '1px solid #e2e8f0' }}>
+                          <div className="flex items-center gap-1.5 mb-1.5">
+                            <Brain size={11} style={{ color: '#6366f1' }} />
+                            <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#6366f1' }}>
+                              {profile.sector || profile.type}
+                            </span>
+                            {profile.underlying && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: '#e0e7ff', color: '#4338ca' }}>
+                                tracks {profile.underlying}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] leading-relaxed mb-2" style={{ color: '#475569' }}>
+                            {profile.watch_context}
+                          </p>
+                          <div className="flex flex-wrap gap-1">
+                            {(profile.key_drivers || []).slice(0, 4).map((d, i) => (
+                              <span key={i} className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: '#ffffff', border: '1px solid #e2e8f0', color: '#64748b' }}>
+                                <Zap size={8} className="inline mr-0.5" style={{ color: '#f59e0b' }} />{d}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       <div className="flex items-center justify-between mt-3">
                         <div className="flex items-center gap-2">
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{
@@ -308,32 +342,44 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
                           style={{ background: isExpanded ? '#eff6ff' : '#f8fafc', color: isExpanded ? '#1d4ed8' : '#64748b', border: `1px solid ${isExpanded ? '#bfdbfe' : '#e2e8f0'}` }}
                         >
                           <Newspaper size={11} />
-                          News
+                          Intelligence Feed
                           {isExpanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
                         </button>
                       </div>
                     </div>
 
-                    {/* Expandable news panel */}
+                    {/* Expandable intelligence feed */}
                     {isExpanded && (
                       <div style={{ borderTop: '1px solid #f1f5f9', background: '#f8fafc' }}>
                         <div className="px-5 py-3 flex items-center justify-between">
-                          <span className="text-xs font-semibold" style={{ color: '#64748b' }}>
-                            Latest news for {stock.ticker}
-                          </span>
-                          {sig && (
+                          <div className="flex items-center gap-1.5">
+                            <Brain size={12} style={{ color: '#6366f1' }} />
+                            <span className="text-xs font-semibold" style={{ color: '#64748b' }}>
+                              Intelligence Feed — {stock.ticker}
+                            </span>
+                          </div>
+                          {articles.length > 0 && (
                             <span className="text-[10px]" style={{ color: '#94a3b8' }}>
-                              {sig.positive_news} positive · {sig.negative_news} negative · {sig.neutral_news} neutral
+                              {articles.filter(a => a.sentiment === 'positive').length}↑ &nbsp;
+                              {articles.filter(a => a.sentiment === 'negative').length}↓ &nbsp;
+                              {articles.filter(a => a.sentiment === 'neutral').length} neutral
                             </span>
                           )}
                         </div>
                         {loadingNews ? (
-                          <div className="px-5 pb-4 text-xs" style={{ color: '#94a3b8' }}>Loading news...</div>
+                          <div className="px-5 pb-4 text-xs" style={{ color: '#94a3b8' }}>Scanning drivers...</div>
                         ) : articles.length === 0 ? (
-                          <div className="px-5 pb-4 text-xs" style={{ color: '#94a3b8' }}>No recent news found.</div>
+                          <div className="px-5 pb-5">
+                            <p className="text-xs mb-1" style={{ color: '#94a3b8' }}>No relevant articles found in the last 7 days.</p>
+                            {profile && (
+                              <p className="text-[10px]" style={{ color: '#cbd5e1' }}>
+                                Watching: {(profile.news_queries || []).join(' · ')}
+                              </p>
+                            )}
+                          </div>
                         ) : (
                           <div className="divide-y" style={{ borderColor: '#e2e8f0' }}>
-                            {articles.slice(0, 6).map((article, i) => (
+                            {articles.slice(0, 8).map((article, i) => (
                               <a key={i} href={article.url} target="_blank" rel="noopener noreferrer"
                                 className="flex items-start gap-3 px-5 py-3 transition-colors"
                                 style={{ textDecoration: 'none' }}
@@ -344,11 +390,16 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
                                 }} />
                                 <div className="flex-1 min-w-0">
                                   <p className="text-xs leading-snug" style={{ color: '#334155' }}>{article.title}</p>
-                                  <div className="flex items-center gap-2 mt-1">
+                                  <div className="flex items-center gap-2 mt-1 flex-wrap">
                                     <span className="text-[10px]" style={{ color: '#94a3b8' }}>{article.source}</span>
                                     {article.published_at && (
                                       <span className="text-[10px]" style={{ color: '#cbd5e1' }}>
                                         {new Date(article.published_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                                      </span>
+                                    )}
+                                    {article.query_tag && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: '#ede9fe', color: '#7c3aed' }}>
+                                        {article.query_tag}
                                       </span>
                                     )}
                                     <span className="text-[10px] px-1.5 py-0.5 rounded" style={{

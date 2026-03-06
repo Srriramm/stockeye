@@ -84,9 +84,12 @@ def _run_analysis(ticker: str, days: int) -> dict:
         # ── Layer 4: Backtest (MAPE) ─────────────────────────────
         backtest = backtest_forecast(historical, ticker, holdout_days=20)
 
-        # ── Layer 5: News sentiment ──────────────────────────────
+        # ── Layer 5: News sentiment (intelligence-driven) ────────
         try:
-            articles = fetch_stock_news(ticker, days=7, max_articles=8)
+            from intelligence_engine import get_stock_profile
+            intel_profile = get_stock_profile(ticker)
+            articles = fetch_stock_news(ticker, days=7, max_articles=8,
+                                        intelligence_profile=intel_profile)
         except Exception as e:
             logger.warning(f"News fetch failed for {ticker}: {e}")
             articles = []

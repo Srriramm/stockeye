@@ -441,7 +441,7 @@ export default function Forecast({ apiUrl }) {
                             <div className="flex items-end justify-between mb-2">
                                 <span className="text-4xl font-bold text-slate-800 font-mono-nums">{forecastData.weighted_score}<span className="text-lg text-slate-500 font-normal">/100</span></span>
                                 <span className="text-xs text-slate-500 bg-white/5 px-2 py-1 rounded border border-slate-100">
-                                    {forecastData.method?.replace(/_/g, ' ')}
+                                    {{'prophet': 'Time-Series ML', 'linear_regression': 'Polynomial ML', 'moving_average': 'Trend MA'}[forecastData.method] ?? forecastData.method?.replace(/_/g, ' ')}
                                 </span>
                             </div>
 
@@ -454,6 +454,9 @@ export default function Forecast({ apiUrl }) {
                                     }}
                                 />
                             </div>
+                            <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
+                                Weighted composite: Technical (35%) · ML Forecast (30%) · News (20%) · Volume (15%)
+                            </p>
                         </div>
                     </div>
 
@@ -574,7 +577,7 @@ export default function Forecast({ apiUrl }) {
                                 <Bot size={18} className="text-indigo-400" />
                                 <span className="text-slate-800 font-bold text-sm tracking-wide uppercase">AI Executive Summary</span>
                                 <span className="ml-auto text-[10px] font-mono font-medium px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded">
-                                    {forecastData.method === 'prophet' ? 'GPT-4o + PROPHET' : 'ENSEMBLE ML'}
+                                    {{'prophet': 'AI + TIME-SERIES ML', 'linear_regression': 'AI + POLYNOMIAL ML', 'moving_average': 'AI + TREND MA'}[forecastData.method] ?? 'AI ANALYSIS'}
                                 </span>
                             </div>
                             <p className="text-slate-700 text-sm leading-7 font-light tracking-wide">
@@ -608,9 +611,20 @@ export default function Forecast({ apiUrl }) {
                             </div>
                         )}
 
-                        {/* 3. News Sentiment */}
-                        {forecastData.news_sentiment && forecastData.news_sentiment.total > 0 && (
-                            <NewsPanel news={forecastData.news_sentiment} />
+                        {/* 3. News Sentiment — always render so user knows it was attempted */}
+                        {forecastData.news_sentiment && (
+                            forecastData.news_sentiment.total > 0
+                                ? <NewsPanel news={forecastData.news_sentiment} />
+                                : (
+                                    <div className="glass-panel p-6 flex flex-col justify-center items-center text-center gap-3">
+                                        <Newspaper size={22} className="text-slate-300" />
+                                        <p className="text-slate-500 text-sm font-medium">No recent news found</p>
+                                        <p className="text-slate-400 text-xs leading-relaxed max-w-xs">
+                                            No relevant articles in the last 7 days for this ticker.
+                                            News sentiment is excluded from the confidence score.
+                                        </p>
+                                    </div>
+                                )
                         )}
 
                     </div>

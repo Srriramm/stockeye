@@ -65,6 +65,7 @@ from stock_data import (
     POPULAR_INDIAN_STOCKS
 )
 from news_monitor import fetch_stock_news, fetch_market_news, get_news_summary, get_reddit_sentiment
+from intelligence_engine import get_stock_profile, invalidate_profile
 from ai_advisor import get_stock_advice, get_stock_advice_dual, analyze_stock, get_portfolio_review, compare_stocks
 from market_monitor import monitor_service, set_socketio as set_monitor_socketio
 from realtime_service import realtime_service, set_socketio as set_realtime_socketio
@@ -962,10 +963,11 @@ def start_stock_monitor(user_id):
     if not price_data:
         return jsonify({'error': f'Could not fetch data for {ticker}'}), 404
 
+    company_name = price_data.get('name', ticker)
     start_monitoring(
         user_id,
         ticker,
-        name=price_data.get('name', ticker),
+        name=company_name,
         price_baseline=price_data['current_price'],
         volume_avg=price_data.get('avg_volume', 0),
     )
@@ -973,6 +975,16 @@ def start_stock_monitor(user_id):
     # Start monitoring service if not running
     if not monitor_service.is_running:
         monitor_service.start()
+
+    # Pre-generate the intelligence profile in a background thread so the
+    # first /api/news/<ticker> call returns immediately with context.
+    import threading
+    threading.Thread(
+        target=get_stock_profile,
+        args=(ticker,),
+        kwargs={'company_name': company_name},
+        daemon=True,
+    ).start()
 
     return jsonify({
         'message': f'Started monitoring {ticker}',
@@ -1929,9 +1941,24 @@ def market_news():
 
 @app.route('/api/news/<ticker>', methods=['GET'])
 def stock_news(ticker):
-    """Get news for a specific stock."""
-    news = fetch_stock_news(ticker.upper())
-    return jsonify({'ticker': ticker.upper(), 'news': news})
+    """Get intelligence-driven news for a stock."""
+    clean = ticker.upper()
+    profile = get_stock_profile(clean)
+    news = fetch_stock_news(clean, intelligence_profile=profile)
+    return jsonify({'ticker': clean, 'news': news, 'profile': profile})
+
+
+@app.route('/api/stocks/<ticker>/intelligence', methods=['GET'])
+def stock_intelligence(ticker):
+    """Return (or generate) the AI intelligence profile for a ticker."""
+    clean = validate_ticker(ticker)
+    # Accept optional company_name hint from query string
+    company_name = request.args.get('name')
+    refresh = request.args.get('refresh', 'false').lower() == 'true'
+    if refresh:
+        invalidate_profile(clean)
+    profile = get_stock_profile(clean, company_name=company_name)
+    return jsonify(profile)
 
 
 @app.route('/api/news/<ticker>/sentiment', methods=['GET'])

@@ -50,41 +50,57 @@ def _set_news_cached(key, value):
     _news_cache[key] = (value, time.time())
 
 
-# ─── Company name mapping for search ───────────────────────────
+# ─── Dynamic company name resolution (replaces static mapping) ──
+# Resolved once per process and cached in-memory.  Any ticker —
+# Nifty 50 constituent, mid-cap, ETF, newly listed — works without
+# any code change because we pull the longName directly from yfinance.
 
-TICKER_TO_COMPANY = {
-    'RELIANCE': 'Reliance Industries',
-    'TCS': 'TCS Tata Consultancy',
-    'HDFCBANK': 'HDFC Bank',
-    'INFY': 'Infosys',
-    'ICICIBANK': 'ICICI Bank',
-    'HINDUNILVR': 'Hindustan Unilever',
-    'SBIN': 'State Bank of India SBI',
-    'BHARTIARTL': 'Bharti Airtel',
-    'ITC': 'ITC Limited',
-    'KOTAKBANK': 'Kotak Mahindra Bank',
-    'LT': 'Larsen Toubro',
-    'AXISBANK': 'Axis Bank',
-    'WIPRO': 'Wipro',
-    'HCLTECH': 'HCL Technologies',
-    'MARUTI': 'Maruti Suzuki',
-    'SUNPHARMA': 'Sun Pharma',
-    'TATAMOTORS': 'Tata Motors',
-    'TATASTEEL': 'Tata Steel',
-    'BAJFINANCE': 'Bajaj Finance',
-    'TITAN': 'Titan Company',
-    'ADANIENT': 'Adani Enterprises',
-    'COALINDIA': 'Coal India',
-    'ONGC': 'ONGC Oil Natural Gas',
-    'DRREDDY': 'Dr Reddy',
-    'CIPLA': 'Cipla',
-    'TECHM': 'Tech Mahindra',
-}
+_name_cache: dict = {}
 
 
-def _get_search_term(ticker):
-    """Convert ticker to search-friendly company name."""
-    return TICKER_TO_COMPANY.get(ticker.upper(), ticker)
+def _get_search_term(ticker: str) -> str:
+    """
+    Return a search-friendly company name for *any* ticker.
+
+    Resolution order:
+      1. In-process cache (populated on first call)
+      2. yfinance .NS suffix  →  .BO suffix  →  bare ticker
+      3. Fallback: return the ticker itself (safe, never crashes)
+
+    The returned name is stripped of legal suffixes (Limited, Ltd, etc.)
+    that rarely appear in news headlines, so search precision is better.
+    """
+    if ticker in _name_cache:
+        return _name_cache[ticker]
+
+    name = None
+    try:
+        import yfinance as yf
+        for suffix in ('.NS', '.BO', ''):
+            try:
+                info = yf.Ticker(f'{ticker}{suffix}').info
+                candidate = info.get('longName') or info.get('shortName')
+                if candidate:
+                    name = candidate
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if name:
+        # Strip legal / exchange suffixes that don't appear in news
+        for sfx in (' Limited', ' Ltd.', ' Ltd', ' Pvt. Ltd', ' Pvt Ltd',
+                    ' Private Limited', ' Corporation', ' Corp.', ' Inc.',
+                    ' (India)', ' - NSE', ' - BSE'):
+            name = name.replace(sfx, '')
+        name = name.strip()
+    else:
+        name = ticker   # safe fallback
+
+    _name_cache[ticker] = name
+    logger.debug(f"[search_term] {ticker} → '{name}'")
+    return name
 
 
 # ─── Generic article patterns to exclude ───────────────────────
@@ -166,65 +182,134 @@ def _deduplicate(articles):
 
 # ─── News API Integration ──────────────────────────────────────
 
-def fetch_stock_news(ticker, days=7, max_articles=10):
-    """Fetch recent news for a specific stock using News API."""
+def fetch_stock_news(ticker, days=7, max_articles=10, intelligence_profile=None):
+    """
+    Fetch recent news for a stock.
+
+    When `intelligence_profile` is supplied (from intelligence_engine), AI-generated
+    queries target the ACTUAL price drivers (e.g. gold prices + Fed rates for GOLDBEES).
+    Falls back to company-name lookup when no profile is available.
+    """
     ticker = ticker.upper()
-    # Strip exchange suffix so TCS.NS looks up the same as TCS
     for _sfx in ('.NS', '.BO'):
         if ticker.endswith(_sfx):
             ticker = ticker[:-len(_sfx)]
             break
+
     cache_key = f"news_{ticker}"
     cached = _get_news_cached(cache_key)
     if cached:
         return cached
 
+    if intelligence_profile and intelligence_profile.get('news_queries'):
+        articles = _fetch_via_intelligence(
+            ticker, intelligence_profile['news_queries'], days, max_articles
+        )
+    else:
+        articles = _fetch_via_company_name(ticker, days, max_articles)
+
+    _enrich_with_ai_sentiment(articles)
+    _set_news_cached(cache_key, articles)
+    return articles
+
+
+def _fetch_via_intelligence(ticker, queries, days, max_articles):
+    """
+    Fetch using AI-generated, driver-specific queries.
+    Each query is a natural phrase ("gold price India"), not an exact company name.
+    No strict _is_relevant filter — the AI scoped the queries.
+    """
+    from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+    all_articles = []
+
+    for query in queries[:4]:
+        fetched = []
+        if NEWS_API_KEY:
+            try:
+                resp = requests.get(
+                    'https://newsapi.org/v2/everything',
+                    params={
+                        'q': query,
+                        'from': from_date,
+                        'sortBy': 'relevancy',
+                        'language': 'en',
+                        'pageSize': 5,
+                        'apiKey': NEWS_API_KEY,
+                    },
+                    timeout=8,
+                )
+                if resp.status_code == 200:
+                    for a in resp.json().get('articles', []):
+                        fetched.append({
+                            'title':        a.get('title', ''),
+                            'description':  a.get('description', ''),
+                            'url':          a.get('url', ''),
+                            'source':       a.get('source', {}).get('name', 'Unknown'),
+                            'published_at': a.get('publishedAt', ''),
+                            'image':        a.get('urlToImage', ''),
+                            'sentiment':    'neutral',
+                            'query_tag':    query,
+                        })
+            except Exception as e:
+                logger.debug(f"[intelligence news] NewsAPI error for '{query}': {e}")
+
+        if not fetched:
+            fetched = _fetch_google_news_rss(query, ticker)
+
+        all_articles.extend(fetched)
+
+    all_articles = _deduplicate(all_articles)
+    all_articles = [a for a in all_articles if not _is_generic(a)]
+    return all_articles[:max_articles]
+
+
+def _is_generic(article):
+    """Return True for articles that are purely generic market noise."""
+    title = (article.get('title', '') + ' ' + article.get('description', '')).lower()
+    return any(pat in title for pat in _GENERIC_PATTERNS)
+
+
+def _fetch_via_company_name(ticker, days, max_articles):
+    """Legacy fetch: exact phrase search on company/ETF name."""
     search_term = _get_search_term(ticker)
     articles = []
 
-    # Try News API
     if NEWS_API_KEY:
         try:
             from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-            url = 'https://newsapi.org/v2/everything'
-            params = {
-                'q': f'"{search_term}" AND (stock OR share OR NSE OR BSE OR market)',
-                'from': from_date,
-                'sortBy': 'relevancy',
-                'language': 'en',
-                'pageSize': max_articles * 2,  # fetch extra to compensate for filtering
-                'apiKey': NEWS_API_KEY,
-            }
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                for article in data.get('articles', []):
+            resp = requests.get(
+                'https://newsapi.org/v2/everything',
+                params={
+                    'q': f'"{search_term}" AND (stock OR share OR NSE OR BSE OR market)',
+                    'from': from_date,
+                    'sortBy': 'relevancy',
+                    'language': 'en',
+                    'pageSize': max_articles * 2,
+                    'apiKey': NEWS_API_KEY,
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                for a in resp.json().get('articles', []):
                     articles.append({
-                        'title': article.get('title', ''),
-                        'description': article.get('description', ''),
-                        'url': article.get('url', ''),
-                        'source': article.get('source', {}).get('name', 'Unknown'),
-                        'published_at': article.get('publishedAt', ''),
-                        'image': article.get('urlToImage', ''),
-                        'sentiment': 'neutral',  # will be overwritten by AI below
+                        'title':        a.get('title', ''),
+                        'description':  a.get('description', ''),
+                        'url':          a.get('url', ''),
+                        'source':       a.get('source', {}).get('name', 'Unknown'),
+                        'published_at': a.get('publishedAt', ''),
+                        'image':        a.get('urlToImage', ''),
+                        'sentiment':    'neutral',
                     })
         except Exception as e:
-            print(f"News API error for {ticker}: {e}")
+            logger.debug(f"[company news] NewsAPI error for {ticker}: {e}")
 
-    # Fallback: Fetch from Google News RSS (company-specific query, no generic suffix)
     if not articles:
-        articles = _fetch_google_news_rss(search_term, ticker)
+        rss_query = search_term if search_term != ticker else f'{ticker} stock NSE'
+        articles = _fetch_google_news_rss(rss_query, ticker)
 
-    # Filter to stock-relevant articles only, then deduplicate
     articles = [a for a in articles if _is_relevant(a, ticker, search_term)]
     articles = _deduplicate(articles)
-    articles = articles[:max_articles]
-
-    # ── AI-classify all headlines in ONE call ───────────────────────────────
-    _enrich_with_ai_sentiment(articles)
-
-    _set_news_cached(cache_key, articles)
-    return articles
+    return articles[:max_articles]
 
 
 def fetch_market_news(max_articles=15):
