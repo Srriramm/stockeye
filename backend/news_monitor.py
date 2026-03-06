@@ -65,47 +65,44 @@ _name_cache: dict = {}
 
 def _get_search_term(ticker: str) -> str:
     """
-    Return a search-friendly company name for *any* ticker.
+    Return a search-friendly company name for any ticker — ALWAYS returns immediately.
 
-    Resolution order:
-      1. In-process cache (populated on first call)
-      2. yfinance .NS suffix  →  .BO suffix  →  bare ticker
-      3. Fallback: return the ticker itself (safe, never crashes)
+    • Cache hit  → resolved name, instant.
+    • Cache miss → returns ticker name right away, schedules yfinance lookup in
+                   background. Subsequent calls (after ~2s) get the proper name.
 
-    The returned name is stripped of legal suffixes (Limited, Ltd, etc.)
-    that rarely appear in news headlines, so search precision is better.
+    Never blocks the calling thread — critical for Flask+eventlet where a blocking
+    yfinance HTTP call would starve the thread pool and cause cascading 499s.
     """
     if ticker in _name_cache:
         return _name_cache[ticker]
 
-    name = None
-    try:
-        import yfinance as yf
-        for suffix in ('.NS', '.BO', ''):
-            try:
-                info = yf.Ticker(f'{ticker}{suffix}').info
-                candidate = info.get('longName') or info.get('shortName')
-                if candidate:
-                    name = candidate
-                    break
-            except Exception:
-                continue
-    except Exception:
-        pass
+    # Immediate safe fallback so callers never wait
+    _name_cache[ticker] = ticker
 
-    if name:
-        # Strip legal / exchange suffixes that don't appear in news
-        for sfx in (' Limited', ' Ltd.', ' Ltd', ' Pvt. Ltd', ' Pvt Ltd',
-                    ' Private Limited', ' Corporation', ' Corp.', ' Inc.',
-                    ' (India)', ' - NSE', ' - BSE'):
-            name = name.replace(sfx, '')
-        name = name.strip()
-    else:
-        name = ticker   # safe fallback
+    def _bg_resolve():
+        try:
+            import yfinance as yf
+            for suffix in ('.NS', '.BO', ''):
+                try:
+                    info = yf.Ticker(f'{ticker}{suffix}').info
+                    candidate = info.get('longName') or info.get('shortName')
+                    if candidate:
+                        for sfx in (' Limited', ' Ltd.', ' Ltd', ' Pvt. Ltd', ' Pvt Ltd',
+                                    ' Private Limited', ' Corporation', ' Corp.', ' Inc.',
+                                    ' (India)', ' - NSE', ' - BSE'):
+                            candidate = candidate.replace(sfx, '')
+                        _name_cache[ticker] = candidate.strip()
+                        logger.debug(f"[search_term] {ticker} → '{_name_cache[ticker]}'")
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
-    _name_cache[ticker] = name
-    logger.debug(f"[search_term] {ticker} → '{name}'")
-    return name
+    import threading
+    threading.Thread(target=_bg_resolve, daemon=True).start()
+    return _name_cache[ticker]
 
 
 # ─── Generic article patterns to exclude ───────────────────────

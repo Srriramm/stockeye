@@ -295,26 +295,31 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
                       {profile && (
                         <div className="mt-3 rounded-lg px-3 py-2" style={{ background: '#f1f5f9', border: '1px solid #e2e8f0' }}>
                           <div className="flex items-center gap-1.5 mb-1.5">
-                            <Brain size={11} style={{ color: '#6366f1' }} />
-                            <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#6366f1' }}>
-                              {profile.sector || profile.type}
+                            <Brain size={11} style={{ color: profile._loading ? '#94a3b8' : '#6366f1' }} />
+                            <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: profile._loading ? '#94a3b8' : '#6366f1' }}>
+                              {profile._loading ? 'Analyzing...' : (profile.sector || profile.type)}
                             </span>
-                            {profile.underlying && (
+                            {!profile._loading && profile.underlying && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: '#e0e7ff', color: '#4338ca' }}>
                                 tracks {profile.underlying}
                               </span>
+                            )}
+                            {profile._loading && (
+                              <span className="inline-block w-3 h-3 rounded-full" style={{ border: '1.5px solid #e2e8f0', borderTopColor: '#6366f1', animation: 'spin 0.8s linear infinite' }} />
                             )}
                           </div>
                           <p className="text-[10px] leading-relaxed mb-2" style={{ color: '#475569' }}>
                             {profile.watch_context}
                           </p>
-                          <div className="flex flex-wrap gap-1">
-                            {(profile.key_drivers || []).slice(0, 4).map((d, i) => (
-                              <span key={i} className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: '#ffffff', border: '1px solid #e2e8f0', color: '#64748b' }}>
-                                <Zap size={8} className="inline mr-0.5" style={{ color: '#f59e0b' }} />{d}
-                              </span>
-                            ))}
-                          </div>
+                          {!profile._loading && (
+                            <div className="flex flex-wrap gap-1">
+                              {(profile.key_drivers || []).slice(0, 4).map((d, i) => (
+                                <span key={i} className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: '#ffffff', border: '1px solid #e2e8f0', color: '#64748b' }}>
+                                  <Zap size={8} className="inline mr-0.5" style={{ color: '#f59e0b' }} />{d}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       )}
 

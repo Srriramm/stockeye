@@ -16,13 +16,15 @@ Example — GOLDBEES:
 
 import json
 import logging
+import threading
 import time
 
 logger = logging.getLogger(__name__)
 
 # ── In-memory cache (profiles are stable; 6h TTL) ───────────────
 _profile_cache: dict = {}
-_CACHE_TTL = 6 * 3600  # 6 hours
+_generating: set = set()          # tickers currently being generated in bg
+_CACHE_TTL = 6 * 3600             # 6 hours
 
 
 def _get_cached(ticker: str):
@@ -36,41 +38,139 @@ def _set_cached(ticker: str, val: dict):
     _profile_cache[ticker] = {'val': val, 'exp': time.time() + _CACHE_TTL}
 
 
+def _clean_ticker(ticker: str) -> str:
+    t = ticker.upper()
+    for sfx in ('.NS', '.BO'):
+        if t.endswith(sfx):
+            return t[:-len(sfx)]
+    return t
+
+
 # ── Public API ───────────────────────────────────────────────────
 
 def get_stock_profile(ticker: str, company_name: str = None) -> dict:
     """
-    Return the intelligence profile for a ticker.
-    Generates via AI on first call; subsequent calls use cache.
+    Return the intelligence profile for a ticker — ALWAYS returns immediately.
 
-    Profile schema:
-      type         : "stock" | "index_ETF" | "commodity_ETF" | "sector_ETF" | "liquid_ETF"
-      sector       : human-readable sector / category
-      underlying   : what the ETF tracks (None for stocks)
-      key_drivers  : list[str] — top 3-5 factors that move this asset's price
-      news_queries : list[str] — search queries that find price-relevant news
-      watch_context: one sentence describing the asset and its primary driver
+    • Cache hit  → full AI profile, instant return.
+    • Cache miss → returns a fast minimal profile RIGHT AWAY and kicks off
+                   full AI + yfinance generation in a daemon background thread.
+                   The cache is updated when the thread finishes; the next
+                   call (after a few seconds) returns the full profile.
+
+    This design is critical for Flask+eventlet: yfinance.Ticker().info makes
+    multiple blocking HTTP requests that would starve the eventlet thread pool
+    and cause 499s on ALL concurrent requests if called in-band.
     """
-    # Strip exchange suffix for cache key
-    clean = ticker.upper()
-    for sfx in ('.NS', '.BO'):
-        if clean.endswith(sfx):
-            clean = clean[:-len(sfx)]
-            break
+    clean = _clean_ticker(ticker)
 
     cached = _get_cached(clean)
     if cached:
         return cached
 
-    profile = _generate_profile(clean, company_name)
-    _set_cached(clean, profile)
-    return profile
+    # Return a minimal profile immediately so the caller is never blocked.
+    minimal = _fast_profile(clean, company_name)
+
+    # Kick off full generation once per ticker (guard against parallel requests).
+    if clean not in _generating:
+        _generating.add(clean)
+
+        def _bg():
+            try:
+                full = _generate_profile(clean, company_name)
+                _set_cached(clean, full)
+                logger.info(f"[intelligence] Background profile ready for {clean}: "
+                            f"{full.get('type')} / {full.get('sector')}")
+            except Exception as e:
+                logger.warning(f"[intelligence] Background generation failed for {clean}: {e}")
+                _set_cached(clean, minimal)   # cache minimal so we don't retry every request
+            finally:
+                _generating.discard(clean)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    return minimal
 
 
 def invalidate_profile(ticker: str):
     """Force re-generation next time (call after manual override)."""
-    clean = ticker.upper().replace('.NS', '').replace('.BO', '')
+    clean = _clean_ticker(ticker)
     _profile_cache.pop(clean, None)
+    _generating.discard(clean)
+
+
+# ── Fast (zero-I/O) minimal profile ─────────────────────────────
+
+def _fast_profile(ticker: str, company_name: str = None) -> dict:
+    """
+    Return a best-effort profile with ZERO network calls.
+    Used as the immediate response while the full profile generates in background.
+    Sets '_loading': True so the frontend knows a richer profile is coming.
+    """
+    name = company_name or ticker
+    clean_name = name
+    for sfx in (' Limited', ' Ltd.', ' Ltd', ' Private Limited', ' Corporation', ' Corp.'):
+        clean_name = clean_name.replace(sfx, '')
+    clean_name = clean_name.strip()
+
+    t = ticker.upper()
+    n = name.upper()
+
+    # ETF detection from ticker/name patterns (no I/O needed)
+    is_etf = any(k in t for k in ('BEES', 'ETF', 'FUND', 'GOLDETF', 'CPSE')) or 'ETF' in n
+
+    if is_etf:
+        # Try to guess the underlying from ticker name
+        underlying = 'market'
+        if any(k in t for k in ('GOLD', 'SILVER', 'METAL')):
+            underlying = 'Gold'
+        elif any(k in t for k in ('BANK',)):
+            underlying = 'Bank Nifty'
+        elif any(k in t for k in ('NIFTY', 'JUNIOR', 'SENSEX')):
+            underlying = 'Nifty index'
+        elif any(k in t for k in ('IT', 'TECH')):
+            underlying = 'IT / Technology'
+        elif any(k in t for k in ('PSU',)):
+            underlying = 'PSU / Government stocks'
+        return {
+            'type': 'ETF',
+            'sector': 'ETF',
+            'underlying': underlying,
+            'key_drivers': [
+                f'{underlying} price movement',
+                'FII/DII institutional fund flows',
+                'RBI monetary policy',
+                'India macroeconomic outlook',
+            ],
+            'news_queries': [
+                f'{underlying} price India',
+                f'{clean_name} ETF NAV',
+                f'{underlying} market outlook',
+                'India ETF fund flows',
+            ],
+            'watch_context': f'{clean_name} — ETF tracking {underlying}. Full analysis loading...',
+            '_loading': True,
+        }
+
+    return {
+        'type': 'stock',
+        'sector': 'Equity',
+        'underlying': None,
+        'key_drivers': [
+            'Quarterly earnings & guidance',
+            'Sector momentum',
+            'Institutional (FII/DII) flows',
+            'Nifty 50 broader market trend',
+        ],
+        'news_queries': [
+            f'{clean_name} quarterly results',
+            f'{clean_name} NSE stock',
+            'India stock market',
+            f'{clean_name} earnings',
+        ],
+        'watch_context': f'{clean_name} — Full intelligence profile loading...',
+        '_loading': True,
+    }
 
 
 # ── Profile Generation ───────────────────────────────────────────
