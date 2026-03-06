@@ -146,7 +146,7 @@ function AdminRoute({ children }) {
 
 /* ─── Main App (authenticated shell) ─────────────────────── */
 function AppShell() {
-  const { user, userRole, signOut } = useAuth();
+  const { user, userRole, isTrial, trialDays, signOut } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [unreadAlerts, setUnreadAlerts] = useState(0);
   const [indices, setIndices] = useState({});
@@ -241,10 +241,10 @@ function AppShell() {
     ...(userRole === 'admin' ? [{ to: '/admin', icon: Shield, label: 'Admin' }] : []),
   ];
 
-  // User avatar: use Google profile pic or initials
-  const avatarUrl = user?.user_metadata?.avatar_url;
-  const displayName = user?.user_metadata?.full_name || user?.email || 'User';
-  const initials = displayName.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
+  // User avatar: use Google profile pic or initials; trial users get a clock icon
+  const avatarUrl = isTrial ? null : user?.user_metadata?.avatar_url;
+  const displayName = isTrial ? 'Trial User' : (user?.user_metadata?.full_name || user?.email || 'User');
+  const initials = isTrial ? '⏱' : displayName.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: '#f8fafc' }}>
@@ -362,7 +362,9 @@ function AppShell() {
               {sidebarOpen && (
                 <div className="flex-1 min-w-0 text-left">
                   <div className="text-xs font-semibold truncate" style={{ color: '#0f172a' }}>{displayName}</div>
-                  <div className="text-[10px] truncate" style={{ color: '#94a3b8' }}>{user?.email}</div>
+                  <div className="text-[10px] truncate" style={{ color: isTrial ? '#f59e0b' : '#94a3b8' }}>
+                    {isTrial ? `${trialDays}d trial remaining` : user?.email}
+                  </div>
                 </div>
               )}
             </button>
@@ -462,6 +464,22 @@ function AppShell() {
             )}
           </div>
         </header>
+
+        {/* Trial banner */}
+        {isTrial && (
+          <div className="flex items-center justify-between px-6 py-2 flex-shrink-0" style={{ background: '#fffbeb', borderBottom: '1px solid #fde68a' }}>
+            <span className="text-xs font-medium" style={{ color: '#92400e' }}>
+              Trial mode · <strong>{trialDays} day{trialDays !== 1 ? 's' : ''} remaining</strong> · Your data will be cleared when the trial ends.
+            </span>
+            <button
+              onClick={() => window.location.href = '/login'}
+              className="text-xs font-semibold px-3 py-1 rounded-lg transition-all"
+              style={{ background: '#f59e0b', color: '#ffffff', border: 'none', cursor: 'pointer' }}
+            >
+              Sign up to save →
+            </button>
+          </div>
+        )}
 
         {/* Page content */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">

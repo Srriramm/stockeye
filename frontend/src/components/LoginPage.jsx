@@ -4,10 +4,11 @@ import { useAuth } from '../context/AuthContext';
 import StockEyeLogo from './StockEyeLogo';
 
 export default function LoginPage() {
-    const { signInWithGoogle, isAuthenticated, loading } = useAuth();
+    const { signInWithGoogle, signInAnonymously, isAuthenticated, loading } = useAuth();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const redirectTo = searchParams.get('redirect') || '/dashboard';
+    const [trialLoading, setTrialLoading] = React.useState(false);
 
     useEffect(() => {
         if (!loading && isAuthenticated) {
@@ -20,6 +21,17 @@ export default function LoginPage() {
             await signInWithGoogle(redirectTo);
         } catch (err) {
             console.error('Login failed:', err);
+        }
+    };
+
+    const handleTrial = async () => {
+        setTrialLoading(true);
+        try {
+            await signInAnonymously();
+            navigate(redirectTo, { replace: true });
+        } catch (err) {
+            console.error('Trial sign-in failed:', err);
+            setTrialLoading(false);
         }
     };
 
@@ -64,6 +76,29 @@ export default function LoginPage() {
                     </svg>
                     <span>Continue with Google</span>
                 </button>
+
+                {/* Divider */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '16px 0 0' }}>
+                    <div style={{ flex: 1, height: 1, background: 'rgba(148,163,184,0.15)' }} />
+                    <span style={{ fontSize: 11, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600 }}>or</span>
+                    <div style={{ flex: 1, height: 1, background: 'rgba(148,163,184,0.15)' }} />
+                </div>
+
+                {/* Try without signing up */}
+                <button
+                    onClick={handleTrial}
+                    disabled={trialLoading}
+                    style={{
+                        ...styles.trialBtn,
+                        opacity: trialLoading ? 0.7 : 1,
+                        cursor: trialLoading ? 'wait' : 'pointer',
+                    }}
+                >
+                    {trialLoading ? 'Starting trial...' : 'Try StockEye — 3 day free trial'}
+                </button>
+                <p style={{ fontSize: 11, color: '#475569', textAlign: 'center', margin: '6px 0 0' }}>
+                    No sign-up needed · explore all features free for 3 days
+                </p>
 
                 {/* Info text */}
                 <p style={styles.infoText}>
@@ -254,6 +289,22 @@ const styles = {
         transition: 'all 0.2s ease',
         boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
         fontFamily: 'inherit',
+    },
+    trialBtn: {
+        width: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '13px 24px',
+        marginTop: 12,
+        background: 'transparent',
+        border: '1px solid rgba(148,163,184,0.3)',
+        borderRadius: 14,
+        fontSize: 14,
+        fontWeight: 600,
+        color: '#94a3b8',
+        fontFamily: 'inherit',
+        transition: 'all 0.2s ease',
     },
     infoText: {
         fontSize: 12,

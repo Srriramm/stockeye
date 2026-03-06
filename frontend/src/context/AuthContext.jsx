@@ -11,10 +11,23 @@ const API_URL = process.env.REACT_APP_API_URL || '';
 const SK_STATUS = 'se_user_status';
 const SK_ROLE   = 'se_user_role';
 
+// localStorage key for trial start timestamp (survives page refresh)
+const LS_TRIAL_SINCE = 'se_trial_since';
+const TRIAL_DURATION_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+
+function trialDaysLeft() {
+    const since = parseInt(localStorage.getItem(LS_TRIAL_SINCE) || '0', 10);
+    if (!since) return 0;
+    const elapsed = Date.now() - since;
+    return Math.max(0, Math.ceil((TRIAL_DURATION_MS - elapsed) / (24 * 60 * 60 * 1000)));
+}
+
 export function AuthProvider({ children }) {
     const [user, setUser]       = useState(null);
     const [session, setSession] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [isTrial, setIsTrial] = useState(false);
+    const [trialDays, setTrialDays] = useState(3);
 
     // Seed from sessionStorage so there's no spinner flash on page reload
     const [userRole,   setUserRoleState]   = useState(() => sessionStorage.getItem(SK_ROLE)   || null);
@@ -33,16 +46,10 @@ export function AuthProvider({ children }) {
     };
 
     useEffect(() => {
-        // directToken: when provided (from onAuthStateChange), bypasses the authAxios
-        // interceptor which calls supabase.auth.getSession() and can deadlock on
-        // Supabase's internal refresh lock (_recoverAndRefresh holds the lock while
-        // onAuthStateChange is firing, causing getSession() to wait → 8 s timeout →
-        // request sent without auth header → 401 → status set to 'rejected').
         const fetchUserMeta = async (isBackground = false, directToken = null) => {
             try {
                 let data;
                 if (directToken) {
-                    // Bypass the interceptor entirely — token is already in hand
                     const res = await axios.get(`${API_URL}/api/auth/me`, {
                         headers: { Authorization: `Bearer ${directToken}` },
                         timeout: 30000,
@@ -54,9 +61,12 @@ export function AuthProvider({ children }) {
                 }
                 setUserRole(data.role);
                 setUserStatus(data.status);
+                if (data.is_trial) {
+                    setIsTrial(true);
+                    setTrialDays(trialDaysLeft());
+                }
             } catch (err) {
                 console.error('Failed to fetch user meta:', err);
-                // On background refresh, keep cached values — don't reject on network hiccup
                 if (!isBackground) {
                     setUserRole('user');
                     setUserStatus('rejected');
@@ -69,12 +79,25 @@ export function AuthProvider({ children }) {
                 const { data: { session: s } } = await supabase.auth.getSession();
                 setSession(s);
                 setUser(s?.user ?? null);
+
+                // Check trial expiry on every page load
+                if (s?.user?.is_anonymous) {
+                    const days = trialDaysLeft();
+                    if (days <= 0) {
+                        // Trial expired — sign out silently
+                        await supabase.auth.signOut();
+                        localStorage.removeItem(LS_TRIAL_SINCE);
+                        setLoading(false);
+                        return;
+                    }
+                    setIsTrial(true);
+                    setTrialDays(days);
+                }
+
                 if (s) {
-                    // If we already have a cached status, unblock the UI immediately
-                    // and refresh in the background
                     if (sessionStorage.getItem(SK_STATUS)) {
                         setLoading(false);
-                        fetchUserMeta(true);   // background refresh — don't clear on error
+                        fetchUserMeta(true);
                     } else {
                         await fetchUserMeta(false);
                         setLoading(false);
@@ -94,19 +117,14 @@ export function AuthProvider({ children }) {
                 setUser(s?.user ?? null);
 
                 if (_event === 'SIGNED_OUT') {
-                    // Explicit sign-out — clear everything
                     setUserRole(null);
                     setUserStatus(null);
+                    setIsTrial(false);
                     setLoading(false);
                     return;
                 }
 
                 if (_event === 'INITIAL_SESSION') {
-                    // init() already handles this via supabase.auth.getSession(), which
-                    // waits for any pending token refresh before returning. Supabase fires
-                    // INITIAL_SESSION with the stored (possibly expired) token BEFORE
-                    // refreshing it, so calling /api/auth/me here would get a 401 → status
-                    // flips to 'rejected'. Let init() do the blocking fetch instead.
                     setLoading(false);
                     return;
                 }
@@ -116,8 +134,6 @@ export function AuthProvider({ children }) {
                     return;
                 }
 
-                // SIGNED_IN: fresh login — no cached status yet, treat errors as fatal
-                // TOKEN_REFRESHED / USER_UPDATED / etc: keep cached values on error
                 const isBackground = _event !== 'SIGNED_IN';
                 await fetchUserMeta(isBackground, s.access_token);
                 setLoading(false);
@@ -137,12 +153,24 @@ export function AuthProvider({ children }) {
         if (error) throw error;
     };
 
+    const signInAnonymously = async () => {
+        const { error } = await supabase.auth.signInAnonymously();
+        if (error) throw error;
+        // Record trial start if not already set
+        if (!localStorage.getItem(LS_TRIAL_SINCE)) {
+            localStorage.setItem(LS_TRIAL_SINCE, String(Date.now()));
+        }
+        setIsTrial(true);
+        setTrialDays(trialDaysLeft());
+    };
+
     const signOut = async () => {
         const { error } = await supabase.auth.signOut();
         if (error) throw error;
-        // Clear cached status on explicit sign-out
         sessionStorage.removeItem(SK_STATUS);
         sessionStorage.removeItem(SK_ROLE);
+        // Clear trial state only on explicit sign-out (not expiry)
+        if (isTrial) localStorage.removeItem(LS_TRIAL_SINCE);
     };
 
     const getAccessToken = async () => {
@@ -156,7 +184,10 @@ export function AuthProvider({ children }) {
         loading,
         userRole,
         userStatus,
+        isTrial,
+        trialDays,
         signInWithGoogle,
+        signInAnonymously,
         signOut,
         getAccessToken,
         isAuthenticated: !!session,

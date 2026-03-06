@@ -176,6 +176,15 @@ def enforce_beta_access():
     except Exception:
         return None  # invalid token — @require_auth handles the 401
 
+    # Anonymous trial users — pass through without DB lookup
+    try:
+        token = auth_header[7:].strip()
+        payload = decode_jwt_payload(token)
+        if payload.get('is_anonymous'):
+            return None
+    except Exception:
+        pass
+
     # Fast path: check Redis cache first
     cached = get_cached_user_status(user_id)
     if cached:
@@ -303,6 +312,19 @@ def get_me(user_id):
     """
     token = request.headers.get('Authorization', '')[7:]
     payload = decode_jwt_payload(token)
+
+    # Anonymous trial users — approve immediately, no DB record created
+    if payload.get('is_anonymous'):
+        return jsonify({
+            'user_id':   user_id,
+            'email':     '',
+            'full_name': 'Trial User',
+            'avatar_url': None,
+            'role':      'user',
+            'status':    'approved',
+            'is_trial':  True,
+        })
+
     email = payload.get('email', '')
     meta = payload.get('user_metadata', {})
     full_name = meta.get('full_name')
@@ -317,6 +339,7 @@ def get_me(user_id):
         'avatar_url': user.get('avatar_url'),
         'role':       user.get('role', 'user'),
         'status':     user.get('status', 'rejected'),
+        'is_trial':   False,
     })
 
 
