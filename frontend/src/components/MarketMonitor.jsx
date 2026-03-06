@@ -20,6 +20,10 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
   const [stockProfiles, setStockProfiles] = useState({});  // { TICKER: profile }
   const [expandedStock, setExpandedStock] = useState(null); // ticker whose news panel is open
   const [newsLoading, setNewsLoading] = useState({});       // { TICKER: bool }
+  const profilePollRef = React.useRef(null);
+  const profilesRef = React.useRef({});
+  const monitoredStocksRef = React.useRef([]);
+  const expandedStockRef = React.useRef(null);
 
   const fetchMonitoredStocks = useCallback(async () => {
     try {
@@ -77,6 +81,66 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
     return () => socket.off('new_alert', handleAlert);
   }, [socket]);
 
+  // Keep refs in sync so the polling interval always reads fresh values
+  profilesRef.current = stockProfiles;
+  monitoredStocksRef.current = monitoredStocks;
+  expandedStockRef.current = expandedStock;
+
+  // Start polling when any profile is still loading; stop when all resolved
+  useEffect(() => {
+    const hasLoading = Object.values(stockProfiles).some(p => p?._loading);
+    if (!hasLoading) {
+      if (profilePollRef.current) { clearInterval(profilePollRef.current); profilePollRef.current = null; }
+      return;
+    }
+    if (profilePollRef.current) return; // already polling
+
+    profilePollRef.current = setInterval(async () => {
+      const profiles = profilesRef.current;
+      const stocks = monitoredStocksRef.current;
+      const expanded = expandedStockRef.current;
+
+      const stillLoading = Object.entries(profiles)
+        .filter(([, p]) => p?._loading)
+        .map(([ticker]) => ticker);
+
+      if (stillLoading.length === 0) {
+        clearInterval(profilePollRef.current);
+        profilePollRef.current = null;
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        stillLoading.map(t => {
+          const s = stocks.find(ms => ms.ticker === t);
+          return axios.get(`${apiUrl}/api/stocks/${t}/intelligence?name=${encodeURIComponent(s?.name || '')}`);
+        })
+      );
+      const updates = {};
+      results.forEach((res, i) => {
+        if (res.status === 'fulfilled' && !res.value.data._loading) {
+          updates[stillLoading[i]] = res.value.data;
+        }
+      });
+      if (Object.keys(updates).length > 0) {
+        setStockProfiles(prev => ({ ...prev, ...updates }));
+        // If the expanded stock's profile just resolved, refresh its news with the full profile
+        if (expanded && updates[expanded]) {
+          setNewsLoading(prev => ({ ...prev, [expanded]: true }));
+          try {
+            const res = await axios.get(`${apiUrl}/api/news/${expanded}`);
+            setStockNews(prev => ({ ...prev, [expanded]: res.data?.news || [] }));
+          } catch { /* no-op */ } finally {
+            setNewsLoading(prev => ({ ...prev, [expanded]: false }));
+          }
+        }
+      }
+    }, 4000);
+
+    return () => { if (profilePollRef.current) { clearInterval(profilePollRef.current); profilePollRef.current = null; } };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stockProfiles, apiUrl]);
+
   const searchStocks = async (query) => {
     if (query.length < 1) { setSearchResults([]); return; }
     try {
@@ -109,7 +173,9 @@ export default function MarketMonitor({ apiUrl, socket, alerts: globalAlerts }) 
       return;
     }
     setExpandedStock(ticker);
-    if (stockNews[ticker]) return; // already fetched
+    // Skip refetch only if we already have articles AND the profile is fully resolved
+    const profileReady = stockProfiles[ticker] && !stockProfiles[ticker]._loading;
+    if (stockNews[ticker] && profileReady) return;
     setNewsLoading(prev => ({ ...prev, [ticker]: true }));
     try {
       const res = await axios.get(`${apiUrl}/api/news/${ticker}`);
