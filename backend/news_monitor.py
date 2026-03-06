@@ -50,6 +50,11 @@ def _set_news_cached(key, value):
     _news_cache[key] = (value, time.time())
 
 
+def clear_news_cache(ticker: str):
+    """Bust the cached news for a ticker (e.g. after a fresh intelligence profile)."""
+    _news_cache.pop(f'news_{ticker.upper()}', None)
+
+
 # ─── Dynamic company name resolution (replaces static mapping) ──
 # Resolved once per process and cached in-memory.  Any ticker —
 # Nifty 50 constituent, mid-cap, ETF, newly listed — works without
@@ -255,6 +260,9 @@ def _fetch_via_intelligence(ticker, queries, days, max_articles):
 
         if not fetched:
             fetched = _fetch_google_news_rss(query, ticker)
+        # Last resort: keyword-scan Indian financial RSS (ET, Moneycontrol, etc.)
+        if not fetched:
+            fetched = _fetch_indian_rss_for_query(query)
 
         all_articles.extend(fetched)
 
@@ -368,72 +376,121 @@ def _fetch_indian_market_news_rss(max_articles=15):
         ('LiveMint Markets', 'https://www.livemint.com/rss/markets'),
     ]
     articles = []
-    try:
-        from bs4 import BeautifulSoup
-        for source_name, feed_url in FEED_URLS:
-            if len(articles) >= max_articles:
-                break
-            try:
-                resp = requests.get(feed_url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
-                if resp.status_code != 200:
-                    continue
-                soup = BeautifulSoup(resp.content, 'xml')
-                items = soup.find_all('item')[:6]
-                for item in items:
-                    title = item.title.get_text(strip=True) if item.title else ''
-                    description = item.description.get_text(strip=True)[:200] if item.description else ''
-                    link = item.link.get_text(strip=True) if item.link else ''
-                    pub_date = item.pubDate.get_text(strip=True) if item.pubDate else ''
-                    if title:
-                        articles.append({
-                            'title': title,
-                            'description': description,
-                            'url': link,
-                            'source': source_name,
-                            'published_at': pub_date,
-                            'sentiment': 'neutral',
-                        })
-            except Exception as e:
-                logger.debug(f"RSS feed error ({source_name}): {e}")
+    for source_name, feed_url in FEED_URLS:
+        if len(articles) >= max_articles:
+            break
+        try:
+            resp = requests.get(feed_url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
+            if resp.status_code != 200:
                 continue
-    except Exception as e:
-        logger.error(f"Indian market RSS fetch error: {e}")
+            for item in _parse_rss_items(resp.content)[:6]:
+                title    = _item_text(item.find('title'))
+                desc     = _item_text(item.find('description'))[:200]
+                pub_date = _item_text(item.find('pubDate'))
+                link_tag = item.find('link')
+                link = ''
+                if link_tag:
+                    link = link_tag.get_text(strip=True) or link_tag.get('href', '')
+                if title:
+                    articles.append({
+                        'title':        title,
+                        'description':  desc,
+                        'url':          link,
+                        'source':       source_name,
+                        'published_at': pub_date,
+                        'sentiment':    'neutral',
+                    })
+        except Exception as e:
+            logger.debug(f"RSS feed error ({source_name}): {e}")
     return articles[:max_articles]
 
 
-def _fetch_google_news_rss(query, ticker):
-    """Fallback: Fetch news from Google News RSS."""
-    articles = []
+def _parse_rss_items(content: bytes):
+    """
+    Parse RSS/XML bytes into BeautifulSoup <item> tags.
+    Tries parsers in order: lxml-xml → xml → html.parser.
+    Never raises — returns [] on any failure.
+    """
     try:
         from bs4 import BeautifulSoup
+    except ImportError:
+        return []
+
+    for parser in ('lxml-xml', 'xml', 'lxml', 'html.parser'):
+        try:
+            soup = BeautifulSoup(content, parser)
+            items = soup.find_all('item')
+            if items:
+                return items
+        except Exception:
+            continue
+    return []
+
+
+def _item_text(tag) -> str:
+    """Safely extract text from a BS4 tag, handling missing tags."""
+    if tag is None:
+        return ''
+    return (tag.get_text(strip=True) if hasattr(tag, 'get_text') else str(tag)).strip()
+
+
+def _fetch_google_news_rss(query, ticker):
+    """Fallback: Fetch news from Google News RSS (parser-resilient)."""
+    articles = []
+    try:
         encoded_query = requests.utils.quote(query)
         url = f'https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en'
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
 
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'xml')
-            items = soup.find_all('item')[:10]
-
-            for item in items:
-                title = item.title.text if item.title else ''
-                description = item.description.text if item.description else ''
-                link = item.link.text if item.link else ''
-                pub_date = item.pubDate.text if item.pubDate else ''
-                source = item.source.text if item.source else 'Google News'
-
-                articles.append({
-                    'title': title,
-                    'description': description[:200],
-                    'url': link,
-                    'source': source,
-                    'published_at': pub_date,
-                    'image': '',
-                    'sentiment': 'neutral',  # enriched by caller via _enrich_with_ai_sentiment
-                })
+            for item in _parse_rss_items(response.content)[:10]:
+                title   = _item_text(item.find('title'))
+                desc    = _item_text(item.find('description'))[:200]
+                pub     = _item_text(item.find('pubDate'))
+                source  = _item_text(item.find('source')) or 'Google News'
+                # <link> in RSS is a text node *between* tags; navigate differently
+                link_tag = item.find('link')
+                link = ''
+                if link_tag:
+                    link = link_tag.get_text(strip=True) or link_tag.get('href', '')
+                if title:
+                    articles.append({
+                        'title':        title,
+                        'description':  desc,
+                        'url':          link,
+                        'source':       source,
+                        'published_at': pub,
+                        'image':        '',
+                        'sentiment':    'neutral',
+                    })
     except Exception as e:
-        print(f"Google News RSS error: {e}")
+        logger.debug(f"Google News RSS error for '{query}': {e}")
 
     return articles
+
+
+def _fetch_indian_rss_for_query(query: str) -> list:
+    """
+    Scan Indian financial RSS feeds (ET, Moneycontrol, etc.) and return
+    articles whose title/description match the query keywords.
+    Used as a last-resort fallback when NewsAPI and Google RSS both fail.
+    """
+    keywords = [w.lower() for w in query.split() if len(w) > 3]
+    if not keywords:
+        return []
+
+    all_articles = _fetch_indian_market_news_rss(max_articles=40)
+
+    matched = []
+    for a in all_articles:
+        text = (a.get('title', '') + ' ' + a.get('description', '')).lower()
+        # Require at least 2 keyword hits, or 1 if query is short (≤2 significant words)
+        hits = sum(1 for kw in keywords if kw in text)
+        if hits >= min(2, len(keywords)):
+            a['query_tag'] = query
+            matched.append(a)
+
+    return matched[:3]
 
 
 # ─── Reddit Sentiment ──────────────────────────────────────────

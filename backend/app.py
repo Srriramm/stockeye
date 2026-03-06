@@ -64,7 +64,7 @@ from stock_data import (
     calculate_fibonacci_levels, find_support_resistance,
     POPULAR_INDIAN_STOCKS
 )
-from news_monitor import fetch_stock_news, fetch_market_news, get_news_summary, get_reddit_sentiment
+from news_monitor import fetch_stock_news, fetch_market_news, get_news_summary, get_reddit_sentiment, clear_news_cache
 from intelligence_engine import get_stock_profile, invalidate_profile
 from ai_advisor import get_stock_advice, get_stock_advice_dual, analyze_stock, get_portfolio_review, compare_stocks
 from market_monitor import monitor_service, set_socketio as set_monitor_socketio
@@ -976,15 +976,14 @@ def start_stock_monitor(user_id):
     if not monitor_service.is_running:
         monitor_service.start()
 
-    # Pre-generate the intelligence profile in a background thread so the
-    # first /api/news/<ticker> call returns immediately with context.
+    # Pre-generate intelligence profile in background, then bust the news cache
+    # so the next /api/news/<ticker> uses the fresh profile immediately.
+    def _prime_intelligence(t, name):
+        get_stock_profile(t, company_name=name)
+        clear_news_cache(t)
+
     import threading
-    threading.Thread(
-        target=get_stock_profile,
-        args=(ticker,),
-        kwargs={'company_name': company_name},
-        daemon=True,
-    ).start()
+    threading.Thread(target=_prime_intelligence, args=(ticker, company_name), daemon=True).start()
 
     return jsonify({
         'message': f'Started monitoring {ticker}',
