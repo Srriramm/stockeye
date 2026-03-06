@@ -48,7 +48,7 @@ COOLDOWN_HOURS = {
     'price_movement': 1,
     'volume_spike':   2,
     'technical':      4,
-    'pattern':        4,
+    'pattern':        24,
     'news':           3,
     'signal':         4,
     'booming':        6,

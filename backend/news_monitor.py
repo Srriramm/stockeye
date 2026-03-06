@@ -425,10 +425,14 @@ def _parse_rss_items(content: bytes):
 
 
 def _item_text(tag) -> str:
-    """Safely extract text from a BS4 tag, handling missing tags."""
+    """Safely extract text from a BS4 tag, handling missing tags and CDATA wrappers."""
     if tag is None:
         return ''
-    return (tag.get_text(strip=True) if hasattr(tag, 'get_text') else str(tag)).strip()
+    text = (tag.get_text(strip=True) if hasattr(tag, 'get_text') else str(tag)).strip()
+    # html.parser treats CDATA as literal text; strip the markers if present
+    if text.startswith('<![CDATA[') and text.endswith(']]>'):
+        text = text[9:-3].strip()
+    return text
 
 
 def _fetch_google_news_rss(query, ticker):
