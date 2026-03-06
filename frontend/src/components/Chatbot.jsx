@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Send, Bot, User, Trash2, Loader2, Sparkles, TrendingUp, Shield, Target, Wallet } from 'lucide-react';
 import axios from 'axios';
 import { authAxios } from '../utils/api';
-import DOMPurify from 'dompurify';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { toast } from 'react-toastify';
 
 const QUICK_QUESTIONS = [
@@ -93,22 +94,44 @@ export default function Chatbot({ apiUrl }) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
 
-  const formatMessage = (text) => {
-    if (!text) return '';
-    return text.split('\n').map((line, i) => {
-      line = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-      line = line.replace(/\*(.*?)\*/g, '<em>$1</em>');
-      if (line.startsWith('### ')) line = `<h4 class="text-sm font-bold mt-3 mb-1" style="color:#0f172a">${line.slice(4)}</h4>`;
-      else if (line.startsWith('## ')) line = `<h3 class="text-base font-bold mt-3 mb-1" style="color:#0f172a">${line.slice(3)}</h3>`;
-      if (line.startsWith('- ') || line.startsWith('* ')) line = `<li class="ml-4 mb-1 list-disc">${line.slice(2)}</li>`;
-      if (/^\d+\.\s/.test(line)) line = `<li class="ml-4 mb-1 list-decimal">${line}</li>`;
-      const clean = DOMPurify.sanitize(line + (i < text.split('\n').length - 1 ? '<br/>' : ''), {
-        ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 'br', 'span', 'h3', 'h4', 'li'],
-        ALLOWED_ATTR: ['class', 'style'],
-      });
-      return <span key={i} dangerouslySetInnerHTML={{ __html: clean }} />;
-    });
-  };
+  const MarkdownMessage = ({ content }) => (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        h1: ({ children }) => <h1 className="text-base font-bold mt-3 mb-1.5" style={{ color: '#0f172a' }}>{children}</h1>,
+        h2: ({ children }) => <h2 className="text-sm font-bold mt-3 mb-1" style={{ color: '#0f172a' }}>{children}</h2>,
+        h3: ({ children }) => <h3 className="text-sm font-semibold mt-2 mb-1" style={{ color: '#1e293b' }}>{children}</h3>,
+        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+        strong: ({ children }) => <strong className="font-semibold" style={{ color: '#0f172a' }}>{children}</strong>,
+        em: ({ children }) => <em className="italic" style={{ color: '#475569' }}>{children}</em>,
+        ul: ({ children }) => <ul className="mb-2 space-y-0.5 pl-4 list-disc">{children}</ul>,
+        ol: ({ children }) => <ol className="mb-2 space-y-0.5 pl-4 list-decimal">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        hr: () => <hr className="my-3" style={{ borderColor: '#e2e8f0' }} />,
+        pre: ({ children }) => (
+          <pre className="p-3 rounded-lg overflow-x-auto my-2 text-xs font-mono" style={{ background: '#f1f5f9', color: '#0f172a' }}>{children}</pre>
+        ),
+        code: ({ children, className }) => className
+          ? <code className={className}>{children}</code>
+          : <code className="px-1 py-0.5 rounded text-xs font-mono" style={{ background: '#f1f5f9', color: '#0f172a' }}>{children}</code>,
+        table: ({ children }) => (
+          <div className="overflow-x-auto my-3 rounded-lg" style={{ border: '1px solid #e2e8f0' }}>
+            <table className="w-full text-xs border-collapse">{children}</table>
+          </div>
+        ),
+        thead: ({ children }) => <thead style={{ background: '#f8fafc' }}>{children}</thead>,
+        tbody: ({ children }) => <tbody>{children}</tbody>,
+        tr: ({ children }) => <tr style={{ borderBottom: '1px solid #f1f5f9' }}>{children}</tr>,
+        th: ({ children }) => <th className="px-3 py-2 text-left font-semibold" style={{ color: '#475569', borderBottom: '1px solid #e2e8f0' }}>{children}</th>,
+        td: ({ children }) => <td className="px-3 py-2 align-top" style={{ color: '#334155' }}>{children}</td>,
+        blockquote: ({ children }) => (
+          <blockquote className="pl-3 my-2 text-xs italic" style={{ borderLeft: '3px solid #e2e8f0', color: '#64748b' }}>{children}</blockquote>
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
 
   const providerBadge = (provider) => {
     if (provider === 'anthropic') return { label: 'Claude', bg: '#fff7ed', color: '#c2410c', border: '#fed7aa' };
@@ -243,7 +266,11 @@ export default function Chatbot({ apiUrl }) {
                     : { background: '#ffffff', border: '1px solid #e2e8f0', color: '#0f172a', borderBottomLeftRadius: 4, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }
                 }
               >
-                <div className="text-sm leading-relaxed">{formatMessage(msg.content)}</div>
+                <div className="text-sm leading-relaxed prose-sm max-w-none">
+                  {msg.role === 'assistant'
+                    ? <MarkdownMessage content={msg.content} />
+                    : msg.content}
+                </div>
                 {msg.role === 'assistant' && badge && (
                   <div className="flex items-center gap-2 mt-2 pt-2" style={{ borderTop: '1px solid #f1f5f9' }}>
                     <span
