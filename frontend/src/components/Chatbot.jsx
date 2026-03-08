@@ -156,7 +156,7 @@ export default function Chatbot({ apiUrl }) {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="font-bold text-sm" style={{ color: '#0f172a' }}>FinAI Finance Consultant</h2>
+              <h2 className="font-bold text-sm" style={{ color: '#0f172a' }}>Stockeye AI Assistant</h2>
               <span
                 className="px-2 py-0.5 text-[10px] font-semibold rounded-full"
                 style={{ background: '#dbeafe', color: '#1e40af' }}
