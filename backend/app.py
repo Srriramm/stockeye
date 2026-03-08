@@ -954,14 +954,15 @@ def remove_stock(user_id, holding_id):
     log_event(user_id, 'portfolio.delete', 'holding', holding_id,
               {'ticker': holding.get('ticker')})
 
-    # Stop monitoring if not in any watchlist either
+    # Remove from all watchlists and stop monitoring
     try:
-        from watchlist_manager import get_stock_in_watchlists
-        in_watchlists = get_stock_in_watchlists(user_id, holding['ticker'])
-        if not in_watchlists:
-            stop_monitoring(user_id, holding['ticker'])
+        ticker = holding['ticker']
+        in_watchlists = get_stock_in_watchlists(user_id, ticker)
+        for wl in in_watchlists:
+            remove_stock_from_watchlist(user_id, wl['id'], ticker)
+        stop_monitoring(user_id, ticker)
     except Exception:
-        stop_monitoring(user_id, holding['ticker'])
+        pass
 
     return jsonify({'message': f'{holding["ticker"]} removed from portfolio'})
 
