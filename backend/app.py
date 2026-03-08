@@ -905,6 +905,14 @@ def add_stock(user_id):
         # Automatically start monitoring portfolio stocks
         start_monitoring(user_id, ticker, name)
 
+        # Sync to default watchlist so it appears everywhere
+        watchlists = get_all_watchlists(user_id)
+        if not watchlists:
+            wl_id = create_watchlist(user_id, 'My Watchlist', 'Default watchlist')
+        else:
+            wl_id = watchlists[0]['id']
+        add_stock_to_watchlist(user_id, wl_id, ticker, name, data.get('sector', ''))
+
         return jsonify({'id': holding_id, 'message': f'{ticker} added to portfolio'}), 201
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
