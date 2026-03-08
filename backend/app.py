@@ -834,6 +834,15 @@ def get_portfolio(user_id):
             'num_holdings': 0,
         })
 
+    # Backfill: ensure all portfolio stocks appear in the default watchlist
+    try:
+        watchlists = get_all_watchlists(user_id)
+        wl_id = watchlists[0]['id'] if watchlists else create_watchlist(user_id, 'My Watchlist', 'Default watchlist')
+        for h in holdings:
+            add_stock_to_watchlist(user_id, wl_id, h['ticker'], h.get('name', ''), h.get('sector', ''))
+    except Exception:
+        pass  # never block portfolio load for a sync failure
+
     tickers = [h['ticker'] for h in holdings]
     prices = get_bulk_prices(tickers)
     portfolio = calculate_portfolio_value(user_id, prices)
@@ -1651,6 +1660,30 @@ def agent_analyze_on_demand(user_id):
         return jsonify({'error': 'Analysis failed — check ticker or API key'}), 500
 
     return jsonify({'recommendation': result}), 200
+
+
+@app.route('/api/agent/analyze-all', methods=['POST'])
+@require_auth
+@limiter.limit("2 per hour")
+def agent_analyze_all(user_id):
+    """Analyze every portfolio holding on-demand. Rate limited to 2/hour."""
+    holdings = get_all_holdings(user_id)
+    if not holdings:
+        return jsonify({'results': [], 'message': 'No holdings to analyze'}), 200
+
+    results = []
+    for h in holdings:
+        try:
+            rec = analyze_stock_for_user(user_id, h['ticker'], session='manual')
+            if rec:
+                results.append({'ticker': h['ticker'], 'status': 'ok',
+                                 'action': rec.get('action'), 'recommendation': rec})
+            else:
+                results.append({'ticker': h['ticker'], 'status': 'failed'})
+        except Exception as exc:
+            results.append({'ticker': h['ticker'], 'status': 'error', 'error': str(exc)})
+
+    return jsonify({'results': results, 'analyzed': len(results)}), 200
 
 
 @app.route('/api/agent/recommendations/<int:rec_id>/read', methods=['PATCH'])

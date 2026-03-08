@@ -395,6 +395,8 @@ export default function AgentInsights({ apiUrl, liveInsights = [], onInsightRead
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('All');
   const [refreshing, setRefreshing] = useState(false);
+  const [analyzingAll, setAnalyzingAll] = useState(false);
+  const [analyzeAllMsg, setAnalyzeAllMsg] = useState('');
   const [unreadCount, setUnreadCount] = useState(0);
 
   const fetchRecs = useCallback(async (silent = false) => {
@@ -451,6 +453,23 @@ export default function AgentInsights({ apiUrl, liveInsights = [], onInsightRead
     setUnreadCount(prev => prev + 1);
   };
 
+  const handleAnalyzeAll = async () => {
+    setAnalyzingAll(true);
+    setAnalyzeAllMsg('');
+    try {
+      const res = await authAxios.post(`${API_URL}/api/agent/analyze-all`);
+      const { results } = res.data;
+      const ok = results.filter(r => r.status === 'ok');
+      ok.forEach(r => { if (r.recommendation) handleNewResult(r.recommendation); });
+      setAnalyzeAllMsg(`Analyzed ${results.length} stocks — ${ok.length} succeeded.`);
+      if (ok.length > 0) fetchRecs(true);
+    } catch (err) {
+      setAnalyzeAllMsg(err.response?.data?.error || 'Analyze all failed.');
+    } finally {
+      setAnalyzingAll(false);
+    }
+  };
+
   const filtered = recs.filter(r => {
     if (filter === 'All') return true;
     if (filter === 'Unread') return !r.is_read;
@@ -499,23 +518,49 @@ export default function AgentInsights({ apiUrl, liveInsights = [], onInsightRead
             Autonomous BUY / SELL / HOLD / WATCH recommendations — runs at 9 AM &amp; 4 PM IST
           </p>
         </div>
-        <button
-          onClick={() => fetchRecs(true)}
-          disabled={refreshing}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            padding: '8px 14px', borderRadius: 10,
-            border: '1px solid #e2e8f0', background: '#fff',
-            color: '#64748b', fontSize: 13, fontWeight: 600,
-            cursor: refreshing ? 'not-allowed' : 'pointer',
-          }}
-          onMouseEnter={e => { if (!refreshing) e.currentTarget.style.background = '#f8fafc'; }}
-          onMouseLeave={e => { e.currentTarget.style.background = '#fff'; }}
-        >
-          <RefreshCw size={13} style={{ animation: refreshing ? 'agent-spin 0.7s linear infinite' : 'none' }} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleAnalyzeAll}
+            disabled={analyzingAll}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '8px 16px', borderRadius: 10,
+              border: 'none', cursor: analyzingAll ? 'not-allowed' : 'pointer',
+              background: analyzingAll ? '#e2e8f0' : 'linear-gradient(135deg, #2563eb, #7c3aed)',
+              color: analyzingAll ? '#94a3b8' : '#fff',
+              fontSize: 13, fontWeight: 600,
+            }}
+            title="Analyze every stock in your portfolio at once"
+          >
+            {analyzingAll
+              ? <><div style={{ width: 12, height: 12, border: '2px solid rgba(0,0,0,0.2)', borderTopColor: '#94a3b8', borderRadius: '50%', animation: 'agent-spin 0.7s linear infinite' }} /> Analyzing...</>
+              : <><Sparkles size={13} /> Analyze All</>}
+          </button>
+          <button
+            onClick={() => fetchRecs(true)}
+            disabled={refreshing}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '8px 14px', borderRadius: 10,
+              border: '1px solid #e2e8f0', background: '#fff',
+              color: '#64748b', fontSize: 13, fontWeight: 600,
+              cursor: refreshing ? 'not-allowed' : 'pointer',
+            }}
+            onMouseEnter={e => { if (!refreshing) e.currentTarget.style.background = '#f8fafc'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = '#fff'; }}
+          >
+            <RefreshCw size={13} style={{ animation: refreshing ? 'agent-spin 0.7s linear infinite' : 'none' }} />
+            Refresh
+          </button>
+        </div>
       </div>
+
+      {/* Analyze-all status */}
+      {analyzeAllMsg && (
+        <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 10, background: '#f0fdf4', border: '1px solid #bbf7d0', fontSize: 13, color: '#15803d' }}>
+          {analyzeAllMsg}
+        </div>
+      )}
 
       {/* On-demand analyze */}
       <div className="mb-6">
