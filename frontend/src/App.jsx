@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Shield } from 'lucide-react';
+import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Shield, Bot } from 'lucide-react';
 import StockEyeLogo from './components/StockEyeLogo';
 import axios from 'axios';
 import { authAxios } from './utils/api';
@@ -19,9 +19,11 @@ import Screener from './components/Screener';
 import SectorHeatmap from './components/SectorHeatmap';
 import OAuthConsent from './components/OAuthConsent';
 import AdminDashboard from './components/AdminDashboard';
+import AgentInsights from './components/AgentInsights';
 import { supabase } from './lib/supabase';
 import wsManager from './utils/websocket';
 import * as apiCache from './utils/apiCache';
+import { toast } from 'react-toastify';
 
 const API_URL = process.env.REACT_APP_API_URL || '';
 
@@ -154,6 +156,8 @@ function AppShell() {
   const [connected, setConnected] = useState(false);
   const [showAlertPanel, setShowAlertPanel] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [liveInsights, setLiveInsights] = useState([]);
+  const [unreadInsights, setUnreadInsights] = useState(0);
 
   const [movers, setMovers] = useState(apiCache.get('movers') || null);
   const [marketNews, setMarketNews] = useState(apiCache.get('marketNews') || null);
@@ -169,6 +173,21 @@ function AppShell() {
       s.on('new_alert', (alert) => {
         setAlerts(prev => [alert, ...prev].slice(0, 50));
         setUnreadAlerts(prev => prev + 1);
+      });
+      s.on('agent_recommendation', (rec) => {
+        setLiveInsights(prev => [rec, ...prev].slice(0, 20));
+        setUnreadInsights(prev => prev + 1);
+        const actionColors = { BUY: '#10b981', SELL: '#ef4444', HOLD: '#f59e0b', WATCH: '#3b82f6' };
+        toast(
+          `${rec.action} ${rec.ticker} · ${Math.round((rec.confidence || 0) * 100)}% confidence`,
+          {
+            style: {
+              borderLeft: `4px solid ${actionColors[rec.action] || '#3b82f6'}`,
+              fontSize: 13,
+            },
+            autoClose: 6000,
+          }
+        );
       });
     });
 
@@ -238,6 +257,7 @@ function AppShell() {
     { to: '/portfolio', icon: Briefcase, label: 'Portfolio' },
     { to: '/chat', icon: MessageSquare, label: 'AI Advisor' },
     { to: '/monitor', icon: Activity, label: 'Monitor' },
+    { to: '/insights', icon: Bot, label: 'Agent Insights', badge: unreadInsights },
     ...(userRole === 'admin' ? [{ to: '/admin', icon: Shield, label: 'Admin' }] : []),
   ];
 
@@ -292,7 +312,7 @@ function AppShell() {
 
         {/* Nav */}
         <nav className="flex-1 py-4 px-3 space-y-0.5 overflow-y-auto custom-scrollbar">
-          {navItems.map(({ to, icon: Icon, label }) => (
+          {navItems.map(({ to, icon: Icon, label, badge }) => (
             <NavLink
               key={to}
               to={to}
@@ -308,17 +328,36 @@ function AppShell() {
             >
               {({ isActive }) => (
                 <>
-                  <Icon
-                    size={18}
-                    strokeWidth={isActive ? 2.5 : 1.75}
-                    style={{ color: isActive ? '#2563eb' : 'inherit', flexShrink: 0 }}
-                  />
+                  <div style={{ position: 'relative', flexShrink: 0 }}>
+                    <Icon
+                      size={18}
+                      strokeWidth={isActive ? 2.5 : 1.75}
+                      style={{ color: isActive ? '#2563eb' : 'inherit' }}
+                    />
+                    {badge > 0 && !sidebarOpen && (
+                      <span style={{
+                        position: 'absolute', top: -4, right: -4,
+                        width: 8, height: 8, borderRadius: '50%',
+                        background: '#ef4444', border: '1.5px solid #fff',
+                      }} />
+                    )}
+                  </div>
                   {sidebarOpen && (
                     <span
-                      className="font-medium text-sm whitespace-nowrap transition-all duration-200 opacity-100"
+                      className="font-medium text-sm whitespace-nowrap transition-all duration-200 opacity-100 flex-1"
                       style={{ color: 'inherit' }}
                     >
                       {label}
+                    </span>
+                  )}
+                  {sidebarOpen && badge > 0 && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 700,
+                      padding: '1px 6px', borderRadius: 10,
+                      background: '#fee2e2', color: '#dc2626',
+                      flexShrink: 0,
+                    }}>
+                      {badge}
                     </span>
                   )}
                   {isActive && !sidebarOpen && (
@@ -492,6 +531,13 @@ function AppShell() {
             <Route path="/portfolio" element={<Portfolio apiUrl={API_URL} socket={wsManager.socket} />} />
             <Route path="/chat" element={<Chatbot apiUrl={API_URL} socket={wsManager.socket} />} />
             <Route path="/monitor" element={<MarketMonitor apiUrl={API_URL} socket={wsManager.socket} alerts={alerts} />} />
+            <Route path="/insights" element={
+              <AgentInsights
+                apiUrl={API_URL}
+                liveInsights={liveInsights}
+                onInsightRead={() => setUnreadInsights(prev => Math.max(0, prev - 1))}
+              />
+            } />
             <Route path="/admin" element={
               <AdminRoute><AdminDashboard apiUrl={API_URL} /></AdminRoute>
             } />

@@ -21,6 +21,7 @@ to connected clients automatically when message_queue is set in app.py.
 import os
 import logging
 from celery import Celery
+from celery.schedules import crontab
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
@@ -59,6 +60,14 @@ celery_app.conf.update(
             'task': 'tasks.save_portfolio_snapshots',
             'schedule': 3600.0,     # every 1 hour
         },
+        'run-proactive-morning': {
+            'task': 'tasks.run_proactive_morning',
+            'schedule': crontab(hour=9, minute=0),   # 9:00 AM IST — pre-market
+        },
+        'run-proactive-evening': {
+            'task': 'tasks.run_proactive_evening',
+            'schedule': crontab(hour=16, minute=0),  # 4:00 PM IST — post-market
+        },
     },
 )
 
@@ -93,4 +102,31 @@ def save_portfolio_snapshots(self):
         monitor_service._check_portfolio_snapshot()
     except Exception as exc:
         logger.error(f"Portfolio snapshot failed: {exc}", exc_info=True)
+        raise self.retry(exc=exc, countdown=60)
+
+
+@celery_app.task(name='tasks.run_proactive_morning', bind=True, max_retries=2)
+def run_proactive_morning(self):
+    """Pre-market proactive analysis — 9:00 AM IST.
+    Claude tool_use agentic loop analyzes all monitored stocks for all users
+    and emits BUY/SELL/HOLD/WATCH recommendations via WebSocket.
+    """
+    try:
+        from proactive_agent import run_analysis_for_all_users
+        run_analysis_for_all_users(session='morning')
+    except Exception as exc:
+        logger.error(f"Proactive morning analysis failed: {exc}", exc_info=True)
+        raise self.retry(exc=exc, countdown=60)
+
+
+@celery_app.task(name='tasks.run_proactive_evening', bind=True, max_retries=2)
+def run_proactive_evening(self):
+    """Post-market proactive analysis — 4:00 PM IST.
+    Runs after market close to review the day and set next-day context.
+    """
+    try:
+        from proactive_agent import run_analysis_for_all_users
+        run_analysis_for_all_users(session='evening')
+    except Exception as exc:
+        logger.error(f"Proactive evening analysis failed: {exc}", exc_info=True)
         raise self.retry(exc=exc, countdown=60)

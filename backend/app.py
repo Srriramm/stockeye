@@ -89,6 +89,12 @@ from advanced_alerts import (
 )
 from forecasting_engine import forecast_stock_price, get_risk_profile
 from brain_engine import run_brain_analysis
+from proactive_agent import analyze_stock_for_user, set_agent_socketio
+from recommendation_store import (
+    get_recommendations, get_recommendation_by_id,
+    mark_recommendation_read, dismiss_recommendation, get_unread_count,
+    init_agent_recommendations_table,
+)
 from middleware import init_middleware
 from rate_limiter import init_limiter, limiter, LIMIT_CHAT, LIMIT_FORECAST, LIMIT_TRADING, LIMIT_PORTFOLIO
 from audit import log_event
@@ -142,8 +148,12 @@ set_monitor_socketio(socketio)
 # Connect realtime price service to socketio
 set_realtime_socketio(socketio)
 
+# Connect proactive agent to socketio (for WebSocket recommendation pushes)
+set_agent_socketio(socketio)
+
 # Initialize database (no-op for Supabase; tables created by setup_db.py)
 init_database()
+init_agent_recommendations_table()
 
 # Note: sync_portfolio_to_monitors is now per-user; skipping global sync
 
@@ -1584,6 +1594,77 @@ def reset_trading_account_endpoint(user_id):
     reset_trading_account(user_id=user_id)
     log_event(user_id, 'account.reset', 'trading_balance')
     return jsonify({'message': 'Trading account reset to ₹1,00,000'})
+
+
+# ═══════════════════════════════════════════════════════════════
+# PROACTIVE AGENT ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/agent/recommendations', methods=['GET'])
+@require_auth
+def agent_recommendations_list(user_id):
+    """List proactive agent recommendations for the authenticated user.
+
+    Query params:
+      unread=true   — only unread recommendations
+      ticker=RELIANCE — filter by ticker
+      limit=20      — max results (default 20, max 50)
+    """
+    unread_only = request.args.get('unread', '').lower() == 'true'
+    ticker = request.args.get('ticker', '').upper() or None
+    limit = min(request.args.get('limit', 20, type=int), 50)
+
+    recs = get_recommendations(user_id, limit=limit,
+                               unread_only=unread_only, ticker=ticker)
+    unread = get_unread_count(user_id)
+    return jsonify({'recommendations': recs, 'unread_count': unread})
+
+
+@app.route('/api/agent/analyze', methods=['POST'])
+@require_auth
+@limiter.limit("5 per hour")
+def agent_analyze_on_demand(user_id):
+    """Trigger an on-demand proactive analysis for a single stock.
+
+    Body: { "ticker": "RELIANCE" }
+    Returns the recommendation synchronously (may take 10-30s).
+    """
+    data = request.json or {}
+    if 'ticker' not in data:
+        return jsonify({'error': 'ticker is required'}), 400
+
+    try:
+        ticker = validate_ticker(data['ticker'])
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    result = analyze_stock_for_user(user_id, ticker, session='manual')
+    if not result:
+        return jsonify({'error': 'Analysis failed — check ticker or API key'}), 500
+
+    return jsonify({'recommendation': result}), 200
+
+
+@app.route('/api/agent/recommendations/<int:rec_id>/read', methods=['PATCH'])
+@require_auth
+def agent_mark_read(user_id, rec_id):
+    """Mark a recommendation as read."""
+    rec = get_recommendation_by_id(user_id, rec_id)
+    if not rec:
+        return jsonify({'error': 'Recommendation not found'}), 404
+    mark_recommendation_read(user_id, rec_id)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/agent/recommendations/<int:rec_id>/dismiss', methods=['PATCH'])
+@require_auth
+def agent_dismiss(user_id, rec_id):
+    """Dismiss (soft-delete) a recommendation."""
+    rec = get_recommendation_by_id(user_id, rec_id)
+    if not rec:
+        return jsonify({'error': 'Recommendation not found'}), 404
+    dismiss_recommendation(user_id, rec_id)
+    return jsonify({'ok': True})
 
 
 # ═══════════════════════════════════════════════════════════════
