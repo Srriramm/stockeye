@@ -449,10 +449,21 @@ def run_agentic_forecast(ticker: str, days: int = 30) -> dict | None:
     forecast_result = None
 
     for iteration in range(MAX_ITERATIONS):
+        # Force-submit nudge after 5 data-gathering rounds to prevent stalling
+        if iteration == 5 and not forecast_result:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "You have gathered enough data. "
+                    "Call submit_forecast NOW with your best assessment. "
+                    "Do not call any more data tools."
+                ),
+            })
+
         try:
             response = client.messages.create(
                 model=model,
-                max_tokens=2200,
+                max_tokens=4096,
                 temperature=0.2,
                 system=SYSTEM_PROMPT,
                 tools=FORECAST_TOOLS,
@@ -462,11 +473,18 @@ def run_agentic_forecast(ticker: str, days: int = 30) -> dict | None:
             logger.error(f"Claude API error in agentic forecaster (iter {iteration}): {exc}")
             break
 
+        logger.debug(
+            f"[{ticker}] iter={iteration} stop_reason={response.stop_reason} "
+            f"blocks={[b.type for b in response.content]}"
+        )
+
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason == "end_turn":
+            logger.warning(f"[{ticker}] Claude ended turn without submitting (iter {iteration})")
             break
         if response.stop_reason != "tool_use":
+            logger.warning(f"[{ticker}] Unexpected stop_reason={response.stop_reason} (iter {iteration})")
             break
 
         tool_results = []
@@ -493,6 +511,7 @@ def run_agentic_forecast(ticker: str, days: int = 30) -> dict | None:
             # ── Execute data tool ─────────────────────────────────
             result = _execute_tool(tool_name, tool_input, ticker, days)
             data_sources.append(tool_name)
+            logger.debug(f"[{ticker}] tool={tool_name} → keys={list(result.keys()) if isinstance(result, dict) else type(result)}")
 
             # ── Model escalation on extreme signals ───────────────
             if tool_name == "get_technical_indicators" and model == MODEL_FAST:

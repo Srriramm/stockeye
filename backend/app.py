@@ -802,7 +802,7 @@ def stock_forecast(ticker):
 
 
 @app.route('/api/stocks/<ticker>/agent-forecast', methods=['GET'])
-@limiter.limit("3 per hour")
+@limiter.limit("10 per hour")
 def agent_stock_forecast(ticker):
     """Agentic Claude forecast — Claude autonomously calls data tools and reasons
     across price, technicals, ML model, news, fundamentals, and risk to produce
