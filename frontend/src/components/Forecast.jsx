@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
     TrendingUp, TrendingDown, Minus, Search, RefreshCw,
     AlertTriangle, Target, BarChart2, Zap, Shield,
-    ChevronRight, Info, Activity, Brain, Newspaper, CheckCircle, Lightbulb, Bot, Layers, ArrowUp, ArrowDown
+    ChevronRight, Info, Activity, Brain, Newspaper, CheckCircle, Bot, Layers, ArrowUp, ArrowDown
 } from 'lucide-react';
 import axios from 'axios';
 import { ComposedChart, Area, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
@@ -27,6 +27,9 @@ export default function Forecast({ apiUrl }) {
     const [riskData, setRiskData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [agentForecast, setAgentForecast] = useState(null);
+    const [agentLoading, setAgentLoading] = useState(false);
+    const [agentError, setAgentError] = useState('');
     const [searchResults, setSearchResults] = useState([]);
     const [showDropdown, setShowDropdown] = useState(false);
     const [histChartData, setHistChartData] = useState([]);
@@ -145,7 +148,7 @@ export default function Forecast({ apiUrl }) {
         setZones(null);
         setHistChartData([]);
         setFcastChartData([]);
-
+        setAgentForecast(null);
 
         try {
             const { period: yp, interval: yi } = PERIOD_MAP['3M'];
@@ -169,7 +172,6 @@ export default function Forecast({ apiUrl }) {
             }));
             setHistChartData(hist);
 
-            // Forecast data for recharts ComposedChart — preserve upper/lower confidence bands
             const fcast = (forecastRes.data.forecast || []).map(d => ({
                 date: d.date,
                 predicted: d.predicted,
@@ -177,6 +179,9 @@ export default function Forecast({ apiUrl }) {
                 lower: d.lower,
             }));
             setFcastChartData(fcast);
+
+            // Auto-trigger agentic forecast in background (non-blocking)
+            fetchAgentForecast(t, days);
         } catch (err) {
             setError(err.response?.data?.error || 'Failed to fetch forecast. Please try again.');
         } finally {
@@ -189,11 +194,30 @@ export default function Forecast({ apiUrl }) {
         if (selectedTicker) fetchForecast(selectedTicker, days);
     };
 
-    const signalConfig = {
-        BUY: { color: '#10b981', bg: 'from-emerald-500/10 to-emerald-600/5', border: 'border-emerald-500/20', icon: TrendingUp, text: 'text-emerald-400', label: 'BUY' },
-        SELL: { color: '#f43f5e', bg: 'from-rose-500/10 to-rose-600/5', border: 'border-rose-500/20', icon: TrendingDown, text: 'text-rose-400', label: 'SELL' },
-        HOLD: { color: '#f59e0b', bg: 'from-amber-500/10 to-amber-600/5', border: 'border-amber-500/20', icon: Minus, text: 'text-amber-400', label: 'HOLD' },
+    const fetchAgentForecast = async (t = selectedTicker, days = forecastDays) => {
+        if (!t) return;
+        setAgentLoading(true);
+        setAgentError('');
+        try {
+            const res = await axios.get(`${apiUrl}/api/stocks/${t}/agent-forecast?days=${days}`);
+            setAgentForecast(res.data);
+        } catch (err) {
+            setAgentError(err.response?.data?.error || 'Agent forecast failed. Try again.');
+        } finally {
+            setAgentLoading(false);
+        }
     };
+
+    const signalConfig = {
+        BUY:  { color: '#10b981', bg: 'from-emerald-500/10 to-emerald-600/5', border: 'border-emerald-500/20', icon: TrendingUp,   text: 'text-emerald-400', label: 'BUY'  },
+        SELL: { color: '#f43f5e', bg: 'from-rose-500/10 to-rose-600/5',       border: 'border-rose-500/20',    icon: TrendingDown,  text: 'text-rose-400',    label: 'SELL' },
+        HOLD: { color: '#f59e0b', bg: 'from-amber-500/10 to-amber-600/5',     border: 'border-amber-500/20',   icon: Minus,         text: 'text-amber-400',   label: 'HOLD' },
+        WATCH:{ color: '#3b82f6', bg: 'from-blue-500/10 to-blue-600/5',       border: 'border-blue-500/20',    icon: Activity,      text: 'text-blue-400',    label: 'WATCH'},
+    };
+
+    // Prefer agent signal (more intelligent) with ML signal as fallback while agent loads
+    const activeSignal = agentForecast?.signal || forecastData?.signal || 'HOLD';
+    const sig = signalConfig[activeSignal] || signalConfig.HOLD;
 
     const riskColors = { Low: '#10b981', Medium: '#f59e0b', High: '#f97316', 'Very High': '#ef4444' };
 
@@ -222,7 +246,6 @@ export default function Forecast({ apiUrl }) {
         );
     };
 
-    const sig = forecastData ? signalConfig[forecastData.signal] || signalConfig.HOLD : null;
 
     return (
         <div className="p-8 space-y-8 fade-in max-w-[1600px] mx-auto min-h-screen">
@@ -383,33 +406,54 @@ export default function Forecast({ apiUrl }) {
                         </div>
                     </div>
 
-                    {/* Signal + Kpi Cards */}
+                    {/* Signal + KPI Cards */}
+                    <style>{`@keyframes agent-spin{to{transform:rotate(360deg)}}`}</style>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        {/* Signal Card */}
+
+                        {/* Card 1: Signal — agent preferred, ML fallback while loading */}
                         <div className={`glass-panel p-6 bg-gradient-to-br ${sig.bg} border ${sig.border}`}>
                             <div className="flex justify-between items-start mb-4">
                                 <div className="space-y-1">
-                                    <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">Algorithmic Signal</span>
+                                    <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">
+                                        {agentForecast ? 'AI Signal' : agentLoading ? 'AI Analysing…' : 'Signal'}
+                                    </span>
                                     <div className="flex items-center gap-2">
-                                        <h3 className={`text-4xl font-black tracking-tight ${sig.text}`}>{forecastData.signal}</h3>
+                                        {agentLoading && !agentForecast ? (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                                <div style={{ width: 18, height: 18, borderRadius: '50%', border: '2px solid #e2e8f0', borderTopColor: '#6366f1', animation: 'agent-spin 0.7s linear infinite' }} />
+                                                <span className="text-2xl font-black text-slate-300">...</span>
+                                            </div>
+                                        ) : (
+                                            <h3 className={`text-4xl font-black tracking-tight ${sig.text}`}>{activeSignal}</h3>
+                                        )}
                                     </div>
                                 </div>
                                 <div className={`w-12 h-12 rounded-xl flex items-center justify-center border ${sig.border} bg-slate-100`}>
-                                    <sig.icon size={24} className={sig.text} />
+                                    {agentLoading && !agentForecast
+                                        ? <Bot size={22} className="text-indigo-400" />
+                                        : <sig.icon size={24} className={sig.text} />}
                                 </div>
                             </div>
                             <div className="flex items-center gap-2 mt-2">
                                 <div className="h-1.5 flex-1 bg-slate-100 rounded-full overflow-hidden">
                                     <div
-                                        className={`h-full rounded-full ${sig.text.replace('text-', 'bg-')}`}
-                                        style={{ width: `${forecastData.confidence}%` }}
+                                        className={`h-full rounded-full transition-all duration-1000 ${sig.text.replace('text-', 'bg-')}`}
+                                        style={{ width: `${agentForecast ? Math.round(agentForecast.confidence * 100) : (forecastData?.confidence || 0)}%` }}
                                     />
                                 </div>
-                                <span className="text-xs font-mono font-bold text-slate-600">{forecastData.confidence}% Conf.</span>
+                                <span className="text-xs font-mono font-bold text-slate-600">
+                                    {agentForecast ? `${Math.round(agentForecast.confidence * 100)}%` : `${forecastData?.confidence || 0}%`} Conf.
+                                </span>
                             </div>
+                            {agentForecast && (
+                                <div className="mt-2 flex items-center gap-1.5">
+                                    <Bot size={10} className="text-indigo-400" />
+                                    <span className="text-[10px] text-indigo-400 font-semibold">AI Agentic · {agentForecast.model_used?.includes('haiku') ? 'Haiku' : 'Sonnet'}</span>
+                                </div>
+                            )}
                         </div>
 
-                        {/* Target Price Card */}
+                        {/* Card 2: Price Target — agent range if loaded, ML target while loading */}
                         <div className="glass-panel p-6">
                             <div className="flex items-center gap-2 mb-4">
                                 <Target size={16} className="text-sky-600" />
@@ -417,46 +461,97 @@ export default function Forecast({ apiUrl }) {
                                     {forecastDays}-Day Target
                                 </span>
                             </div>
-                            <div className="flex items-baseline gap-3">
-                                <span className="text-4xl font-bold text-slate-800 font-mono-nums tracking-tight">
-                                    {formatINR(forecastData.target_price)}
-                                </span>
-                                <div className={`flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded ${forecastData.trend_pct >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-                                    {forecastData.trend_pct >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                                    {forecastData.trend_pct >= 0 ? '+' : ''}{forecastData.trend_pct?.toFixed(2)}%
-                                </div>
-                            </div>
-                            <div className="mt-3 text-xs text-slate-500 font-mono">
-                                Current: <span className="text-slate-600">{formatINR(forecastData.current_price)}</span>
-                            </div>
+                            {agentForecast ? (
+                                <>
+                                    <div className="flex items-baseline gap-3">
+                                        <span className="text-4xl font-bold text-slate-800 font-mono-nums tracking-tight">
+                                            {formatINR(agentForecast.price_target)}
+                                        </span>
+                                        <div className={`flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded ${(agentForecast.trend_pct || 0) >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                            {(agentForecast.trend_pct || 0) >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                                            {(agentForecast.trend_pct || 0) >= 0 ? '+' : ''}{agentForecast.trend_pct?.toFixed(2)}%
+                                        </div>
+                                    </div>
+                                    <div className="mt-2 text-xs text-slate-500 font-mono">
+                                        Range: <span className="text-slate-600">{formatINR(agentForecast.price_target_low)} – {formatINR(agentForecast.price_target_high)}</span>
+                                    </div>
+                                    <div className="mt-1 text-xs text-slate-500 font-mono">
+                                        Current: <span className="text-slate-600">{formatINR(agentForecast.current_price || forecastData?.current_price)}</span>
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="flex items-baseline gap-3">
+                                        <span className="text-4xl font-bold text-slate-800 font-mono-nums tracking-tight">
+                                            {formatINR(forecastData?.target_price)}
+                                        </span>
+                                        <div className={`flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded ${(forecastData?.trend_pct || 0) >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                            {(forecastData?.trend_pct || 0) >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                                            {(forecastData?.trend_pct || 0) >= 0 ? '+' : ''}{forecastData?.trend_pct?.toFixed(2)}%
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 text-xs text-slate-500 font-mono">
+                                        Current: <span className="text-slate-600">{formatINR(forecastData?.current_price)}</span>
+                                    </div>
+                                    {agentLoading && (
+                                        <div className="mt-2 flex items-center gap-1.5 text-[10px] text-indigo-400">
+                                            <div style={{ width: 8, height: 8, borderRadius: '50%', border: '1.5px solid #e2e8f0', borderTopColor: '#6366f1', animation: 'agent-spin 0.7s linear infinite' }} />
+                                            Agent refining target…
+                                        </div>
+                                    )}
+                                </>
+                            )}
                         </div>
 
-                        {/* Model Confidence Card */}
+                        {/* Card 3: Entry Zone + Stop Loss (agent) or ML confidence (while loading) */}
                         <div className="glass-panel p-6">
-                            <div className="flex items-center gap-2 mb-4">
-                                <Zap size={16} className="text-amber-400" />
-                                <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">Brain Confidence</span>
-                            </div>
-
-                            <div className="flex items-end justify-between mb-2">
-                                <span className="text-4xl font-bold text-slate-800 font-mono-nums">{forecastData.weighted_score}<span className="text-lg text-slate-500 font-normal">/100</span></span>
-                                <span className="text-xs text-slate-500 bg-white/5 px-2 py-1 rounded border border-slate-100">
-                                    {{'prophet': 'Time-Series ML', 'linear_regression': 'Polynomial ML', 'moving_average': 'Trend MA'}[forecastData.method] ?? forecastData.method?.replace(/_/g, ' ')}
-                                </span>
-                            </div>
-
-                            <div className="w-full bg-white/5 rounded-full h-2 mt-3">
-                                <div
-                                    className="h-2 rounded-full transition-all duration-1000 ease-out"
-                                    style={{
-                                        width: `${forecastData.weighted_score ?? forecastData.confidence}%`,
-                                        background: 'linear-gradient(90deg, #ec4899, #8b5cf6)'
-                                    }}
-                                />
-                            </div>
-                            <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-                                Weighted composite: Technical (35%) · ML Forecast (30%) · News (20%) · Volume (15%)
-                            </p>
+                            {agentForecast ? (
+                                <>
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <ArrowDown size={16} className="text-emerald-400" />
+                                        <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">Entry Zone</span>
+                                    </div>
+                                    <div className="text-2xl font-bold text-emerald-500 font-mono-nums mb-4">
+                                        {agentForecast.entry_zone_low
+                                            ? `${formatINR(agentForecast.entry_zone_low)} – ${formatINR(agentForecast.entry_zone_high)}`
+                                            : '—'}
+                                    </div>
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <Shield size={14} className="text-rose-400" />
+                                        <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">Stop Loss</span>
+                                    </div>
+                                    <div className="text-2xl font-bold text-rose-400 font-mono-nums">
+                                        {formatINR(agentForecast.stop_loss)}
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="flex items-center gap-2 mb-4">
+                                        <Zap size={16} className="text-amber-400" />
+                                        <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">
+                                            {agentLoading ? 'Agent Analysing' : 'ML Confidence'}
+                                        </span>
+                                    </div>
+                                    {agentLoading ? (
+                                        <div className="flex flex-col items-center justify-center h-20 gap-3">
+                                            <div style={{ width: 28, height: 28, borderRadius: '50%', border: '3px solid #e2e8f0', borderTopColor: '#6366f1', animation: 'agent-spin 0.8s linear infinite' }} />
+                                            <span className="text-xs text-slate-400">Claude is reasoning…</span>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div className="flex items-end justify-between mb-2">
+                                                <span className="text-4xl font-bold text-slate-800 font-mono-nums">{forecastData?.weighted_score}<span className="text-lg text-slate-500 font-normal">/100</span></span>
+                                                <span className="text-xs text-slate-500 bg-white/5 px-2 py-1 rounded border border-slate-100">
+                                                    {{'prophet': 'Time-Series ML', 'linear_regression': 'Polynomial ML', 'moving_average': 'Trend MA'}[forecastData?.method] ?? forecastData?.method?.replace(/_/g, ' ')}
+                                                </span>
+                                            </div>
+                                            <div className="w-full bg-white/5 rounded-full h-2 mt-3">
+                                                <div className="h-2 rounded-full transition-all duration-1000 ease-out" style={{ width: `${forecastData?.weighted_score ?? forecastData?.confidence ?? 0}%`, background: 'linear-gradient(90deg,#ec4899,#8b5cf6)' }} />
+                                            </div>
+                                        </>
+                                    )}
+                                </>
+                            )}
                         </div>
                     </div>
 
@@ -568,66 +663,82 @@ export default function Forecast({ apiUrl }) {
                     {/* ── Smart Entry/Exit Zones Panel ── */}
                     {zones && <ZonesPanel zones={zones} formatINR={formatINR} />}
 
-                    {/* ─── AI EVIDENCE PANELS ─────────────────────────────── */}
-
-                    {/* 1. AI Narrative */}
-                    {forecastData.ai_narrative && (
-                        <div className="glass-panel p-6 bg-gradient-to-r from-indigo-500/10 to-blue-500/5 border-l-4 border-l-indigo-500">
-                            <div className="flex items-center gap-2 mb-3">
-                                <Bot size={18} className="text-indigo-400" />
-                                <span className="text-slate-800 font-bold text-sm tracking-wide uppercase">AI Executive Summary</span>
+                    {/* ─── AI AGENT ANALYSIS ──────────────────────────────── */}
+                    <div className="glass-panel p-6 bg-gradient-to-r from-indigo-500/10 to-blue-500/5 border-l-4 border-l-indigo-500">
+                        <div className="flex items-center gap-2 mb-4">
+                            <Bot size={18} className="text-indigo-400" />
+                            <span className="text-slate-800 font-bold text-sm tracking-wide uppercase">AI Agent Analysis</span>
+                            {agentForecast && (
                                 <span className="ml-auto text-[10px] font-mono font-medium px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded">
-                                    {{'prophet': 'AI + TIME-SERIES ML', 'linear_regression': 'AI + POLYNOMIAL ML', 'moving_average': 'AI + TREND MA'}[forecastData.method] ?? 'AI ANALYSIS'}
+                                    {agentForecast.model_used?.includes('haiku') ? 'HAIKU' : 'SONNET'} · {agentForecast.data_sources?.length || 0} TOOLS
                                 </span>
-                            </div>
-                            <p className="text-slate-700 text-sm leading-7 font-light tracking-wide">
-                                {forecastData.ai_narrative}
-                            </p>
+                            )}
                         </div>
-                    )}
 
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-                        {/* 2. Evidence Breakdown */}
-                        {forecastData.score_breakdown && (
-                            <div className="glass-panel p-6">
-                                <div className="flex items-center justify-between mb-6">
-                                    <div className="flex items-center gap-2">
-                                        <Lightbulb size={16} className="text-amber-400" />
-                                        <h3 className="text-slate-800 font-bold text-sm">Signal Contributors</h3>
-                                    </div>
-                                    <span className="text-xs font-mono text-slate-500">Composite Weighting</span>
-                                </div>
-                                <div className="space-y-4">
-                                    {Object.entries(forecastData.score_breakdown).map(([key, v]) => (
-                                        <EvidenceBar
-                                            key={key}
-                                            label={v.label}
-                                            score={v.score}
-                                            weight={Math.round(v.weight * 100)}
-                                        />
-                                    ))}
-                                </div>
+                        {agentLoading && !agentForecast && (
+                            <div className="flex items-center gap-3 py-3">
+                                <div style={{ width: 18, height: 18, borderRadius: '50%', border: '2px solid #e2e8f0', borderTopColor: '#6366f1', flexShrink: 0, animation: 'agent-spin 0.7s linear infinite' }} />
+                                <span className="text-slate-500 text-sm">Gathering evidence across price, technicals, ML model, news &amp; fundamentals…</span>
                             </div>
                         )}
 
-                        {/* 3. News Sentiment — always render so user knows it was attempted */}
-                        {forecastData.news_sentiment && (
-                            forecastData.news_sentiment.total > 0
-                                ? <NewsPanel news={forecastData.news_sentiment} />
-                                : (
-                                    <div className="glass-panel p-6 flex flex-col justify-center items-center text-center gap-3">
-                                        <Newspaper size={22} className="text-slate-300" />
-                                        <p className="text-slate-500 text-sm font-medium">No recent news found</p>
-                                        <p className="text-slate-400 text-xs leading-relaxed max-w-xs">
-                                            No relevant articles in the last 7 days for this ticker.
-                                            News sentiment is excluded from the confidence score.
-                                        </p>
-                                    </div>
-                                )
+                        {agentError && !agentLoading && (
+                            <p className="text-rose-500 text-sm">{agentError}</p>
                         )}
 
+                        {agentForecast && (
+                            <>
+                                <p className="text-slate-700 text-sm leading-7 font-light tracking-wide mb-5">
+                                    {agentForecast.reasoning}
+                                </p>
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                    <div>
+                                        <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-3">Key Drivers</div>
+                                        {agentForecast.key_drivers?.map((d, i) => (
+                                            <div key={i} className="flex gap-2 mb-2">
+                                                <span className="text-emerald-500 font-bold text-sm leading-relaxed flex-shrink-0">•</span>
+                                                <span className="text-slate-600 text-xs leading-relaxed">{d}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div>
+                                        <div className="text-[10px] font-bold text-amber-600 uppercase tracking-wider mb-3">Risks</div>
+                                        {agentForecast.risks?.map((r, i) => (
+                                            <div key={i} className="flex gap-2 mb-2">
+                                                <span className="text-amber-500 font-bold text-sm leading-relaxed flex-shrink-0">⚠</span>
+                                                <span className="text-slate-600 text-xs leading-relaxed">{r}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                {agentForecast.data_sources?.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-2 mt-4 pt-4 border-t border-indigo-500/20">
+                                        <span className="text-[10px] text-slate-400 font-semibold">Tools called:</span>
+                                        {agentForecast.data_sources.map(s => (
+                                            <span key={s} className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                                                {s.replace(/_/g, ' ')}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                            </>
+                        )}
                     </div>
+
+                    {/* News Sentiment */}
+                    {forecastData.news_sentiment && (
+                        forecastData.news_sentiment.total > 0
+                            ? <NewsPanel news={forecastData.news_sentiment} />
+                            : (
+                                <div className="glass-panel p-6 flex flex-col justify-center items-center text-center gap-3">
+                                    <Newspaper size={22} className="text-slate-300" />
+                                    <p className="text-slate-500 text-sm font-medium">No recent news found</p>
+                                    <p className="text-slate-400 text-xs leading-relaxed max-w-xs">
+                                        No relevant articles in the last 7 days for this ticker.
+                                    </p>
+                                </div>
+                            )
+                    )}
 
                     {/* 4. Technical Indicators */}
                     {forecastData.technical_indicators && (
@@ -702,6 +813,7 @@ export default function Forecast({ apiUrl }) {
                             </div>
                         </div>
                     )}
+
                 </div>
             )}
         </div>
@@ -735,29 +847,6 @@ const PlusIcon = ({ size, className, ...props }) => (
         <path d="M12 5v14" />
     </svg>
 );
-
-// ─── Evidence Bar ────────────────────────────────────────────────
-function EvidenceBar({ label, score, weight }) {
-    const color = score >= 65 ? '#10b981' : score >= 45 ? '#f59e0b' : '#f43f5e';
-    return (
-        <div>
-            <div className="flex justify-between items-center mb-1.5">
-                <span className="text-slate-500 text-xs font-medium">{label}</span>
-                <span className="text-xs text-slate-500 font-mono">
-                    <span className="font-bold" style={{ color }}>{score}</span>
-                    <span className="opacity-50">/100</span>
-                    <span className="text-slate-600 ml-2 text-[10px]">({weight}% w)</span>
-                </span>
-            </div>
-            <div className="w-full bg-slate-100/50 rounded-full h-1.5 shadow-inner border border-slate-100">
-                <div
-                    className="h-1.5 rounded-full transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(0,0,0,0.3)]"
-                    style={{ width: `${score}%`, background: color }}
-                />
-            </div>
-        </div>
-    );
-}
 
 // ─── Technical Indicators Panel ──────────────────────────────────
 function TechnicalPanel({ indicators: ind }) {

@@ -107,6 +107,18 @@ def _run_analysis(ticker: str, days: int) -> dict:
         }
         composite = round(sum(v['score'] * v['weight'] for v in breakdown.values()))
 
+        # ── Brain-derived signal — must agree with BOTH composite AND forecast direction
+        # A BUY needs bullish composite (>=62) AND price forecast to be positive (>1%)
+        # A SELL needs either very bearish composite (<=38) OR large downward forecast (<-5%)
+        # Everything else is HOLD — avoids contradicting signals like "BUY but target < current"
+        trend_pct = forecast.get('trend_pct', 0)
+        if composite >= 62 and trend_pct > 1:
+            brain_signal = 'BUY'
+        elif composite <= 38 or trend_pct < -5:
+            brain_signal = 'SELL'
+        else:
+            brain_signal = 'HOLD'
+
         # ── AI Narrative ──────────────────────────────────────────
         narrative = _generate_narrative(
             ticker, current_price, forecast, tech, news, backtest, composite
@@ -114,6 +126,7 @@ def _run_analysis(ticker: str, days: int) -> dict:
 
         return {
             **forecast,
+            'signal':                brain_signal,   # override ML-only signal with brain signal
             'confidence':            composite,
             'technical_indicators':  tech,
             'news_sentiment':        news,

@@ -801,6 +801,28 @@ def stock_forecast(ticker):
     return jsonify(result)
 
 
+@app.route('/api/stocks/<ticker>/agent-forecast', methods=['GET'])
+@limiter.limit("3 per hour")
+def agent_stock_forecast(ticker):
+    """Agentic Claude forecast — Claude autonomously calls data tools and reasons
+    across price, technicals, ML model, news, fundamentals, and risk to produce
+    a structured forecast. Cached 6 hours per ticker+days."""
+    days = request.args.get('days', 30, type=int)
+    days = max(7, min(days, 60))
+
+    try:
+        ticker_clean = validate_ticker(ticker)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    from agentic_forecaster import run_agentic_forecast
+    result = run_agentic_forecast(ticker_clean, days=days)
+    if not result:
+        return jsonify({'error': 'Agent forecast failed — check API key or try again'}), 500
+
+    return jsonify(result)
+
+
 @app.route('/api/stocks/<ticker>/risk-profile', methods=['GET'])
 def stock_risk_profile(ticker):
     """Get comprehensive risk metrics for a stock."""

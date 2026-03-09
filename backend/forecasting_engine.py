@@ -302,21 +302,21 @@ def _generate_signal(trend_pct: float, confidence: float, df: pd.DataFrame) -> t
     else:
         rsi = 50  # neutral
 
-    # Signal decision — thresholds adjusted to be less strict
+    # Signal decision
     if trend_pct > 5 and rsi < 70 and confidence > 60:
         signal, strength = 'BUY', 'Strong'
     elif trend_pct > 2 and rsi < 65:
         signal, strength = 'BUY', 'Moderate'
     elif trend_pct > 0.5 and rsi < 55:
         signal, strength = 'BUY', 'Weak'
-    elif trend_pct < -5 and rsi > 30:
+    elif trend_pct < -5:
         signal, strength = 'SELL', 'Strong'
-    elif trend_pct < -2 and rsi > 35:
+    elif trend_pct < -2:
         signal, strength = 'SELL', 'Moderate'
-    elif trend_pct < -0.5 and rsi > 45:
+    elif trend_pct < -0.5:
         signal, strength = 'SELL', 'Weak'
     else:
-        # Flat forecast — use RSI to break the tie
+        # Genuinely flat forecast (|trend| < 0.5%) — RSI breaks the tie
         if rsi < 40:
             signal, strength = 'BUY', 'Weak'   # Oversold + flat = potential bottom
         elif rsi > 60:
