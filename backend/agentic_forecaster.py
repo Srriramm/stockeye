@@ -45,14 +45,18 @@ WORKFLOW — follow this order, calling tools as needed:
 8. submit_forecast       — your final structured forecast
 
 REASONING RULES:
-- ML model is a starting point, not the verdict — reason beyond it
+- ML model gives DIRECTION only — do NOT copy its target price or confidence bands into submit_forecast
+- Price targets must come from support/resistance levels and your own analysis, not ML confidence intervals
 - Oversold RSI alone does NOT justify BUY if trend + MACD are bearish
 - A strong negative news catalyst overrides mild bullish technicals
-- Price target MUST be consistent with signal:
-    BUY  → target > current price
-    SELL → target < current price
-    HOLD → target within ±2% of current
-    WATCH → uncertain, monitoring needed
+- Signal/target MUST be consistent — strictly enforce:
+    BUY   → price_target MUST be above current price (use nearest resistance as target)
+    SELL  → price_target MUST be below current price (use nearest support as target)
+    HOLD  → price_target within ±5% of current (if mixed signals push a HOLD, target = current ±3%)
+    WATCH → price_target within ±8% of current (monitoring zone)
+  If your computed target would be >5% below current, the signal is SELL, not HOLD.
+  If your computed target would be >5% above current, the signal is BUY, not HOLD.
+- price_target_low / price_target_high = your bear-case and bull-case, derived from support/resistance zones, NOT from ML confidence bands
 - Confidence 0.5–0.65 for mixed signals, 0.7–0.85 for clear signals
 - Always cite specific numbers in reasoning (RSI value, MACD direction, P/E, news count)
 - Stop loss should be at or just below nearest support level
@@ -183,22 +187,36 @@ FORECAST_TOOLS = [
             "properties": {
                 "price_target": {
                     "type": "number",
-                    "description": "Primary price target at end of forecast period (INR)",
+                    "description": (
+                        "Your own price target (INR) derived from support/resistance analysis — "
+                        "NOT copied from ML model output. For BUY: nearest resistance. "
+                        "For SELL: nearest support. For HOLD: current price ±3%."
+                    ),
                 },
                 "price_target_low": {
                     "type": "number",
-                    "description": "Bear-case / lower-bound price target (INR)",
+                    "description": (
+                        "Bear-case price (INR) — use nearest support level from get_support_resistance, "
+                        "NOT the ML confidence band lower bound."
+                    ),
                 },
                 "price_target_high": {
                     "type": "number",
-                    "description": "Bull-case / upper-bound price target (INR)",
+                    "description": (
+                        "Bull-case price (INR) — use nearest resistance level from get_support_resistance, "
+                        "NOT the ML confidence band upper bound."
+                    ),
                 },
                 "signal": {
                     "type": "string",
                     "enum": ["BUY", "SELL", "HOLD", "WATCH"],
                     "description": (
-                        "Trading signal. BUY only if target > current AND evidence supports it. "
-                        "SELL if target < current. HOLD for flat/uncertain. WATCH to monitor."
+                        "Trading signal — MUST match your price_target direction. "
+                        "BUY: target > current price (upside expected). "
+                        "SELL: target < current price (downside expected, >3% decline). "
+                        "HOLD: mixed/unclear signals; target stays within ±5% of current. "
+                        "WATCH: insufficient data or high uncertainty. "
+                        "If technicals/ML both point down >5%, choose SELL not HOLD."
                     ),
                 },
                 "confidence": {
