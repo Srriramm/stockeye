@@ -2331,6 +2331,85 @@ def get_peer_comparison(ticker):
 
 
 # ═══════════════════════════════════════════════════════════════
+# AUTO TRADING
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/auto-trading/opportunities', methods=['GET'])
+@require_auth
+def get_auto_trading_opportunities(user_id):
+    """Scan market for current arbitrage / statistical opportunities."""
+    try:
+        from db import execute_query
+        rows = execute_query(
+            "SELECT ws.ticker FROM watchlist_stocks ws "
+            "JOIN watchlists w ON ws.watchlist_id = w.id "
+            "WHERE w.user_id = %s LIMIT 20",
+            (user_id,)
+        ) or []
+        tickers = [r['ticker'] for r in rows]
+        from arbitrage_detector import scan_opportunities
+        opps = scan_opportunities(tickers)
+        return jsonify({'opportunities': opps, 'count': len(opps)})
+    except Exception as exc:
+        logger.error(f"get_auto_trading_opportunities error: {exc}")
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/auto-trading/run', methods=['POST'])
+@require_auth
+@limiter.limit("2 per hour")
+def run_auto_trading_session(user_id):
+    """Trigger one autonomous paper-trading session."""
+    from agentic_trader import run_trading_session
+    result = run_trading_session(user_id)
+    if not result:
+        return jsonify({'error': 'Trading session failed — check API key or logs'}), 500
+    return jsonify(result)
+
+
+@app.route('/api/auto-trading/session/active', methods=['GET'])
+@require_auth
+def get_active_trading_session(user_id):
+    """Return the current or last session state for this user."""
+    from agentic_trader import get_active_session
+    session = get_active_session(user_id)
+    return jsonify(session if session else {'status': 'idle'})
+
+
+@app.route('/api/auto-trading/broker/status', methods=['GET'])
+@require_auth
+def get_broker_status(user_id):
+    """Return current broker connection status."""
+    from broker_manager import get_broker
+    return jsonify(get_broker().get_status())
+
+
+@app.route('/api/auto-trading/broker/login-url', methods=['GET'])
+@require_auth
+def get_broker_login_url(user_id):
+    """Get Zerodha Kite OAuth login URL (only when ZERODHA_API_KEY is set)."""
+    from broker_manager import get_broker
+    broker = get_broker()
+    url = broker.get_login_url()
+    if not url:
+        return jsonify({'error': 'No live broker configured. Set ZERODHA_API_KEY to enable.'}), 400
+    return jsonify({'login_url': url, 'broker': broker.broker_name})
+
+
+@app.route('/api/auto-trading/broker/callback', methods=['GET'])
+def broker_oauth_callback():
+    """OAuth callback from Zerodha Kite after user login."""
+    request_token = request.args.get('request_token')
+    if not request_token:
+        return jsonify({'error': 'Missing request_token in callback'}), 400
+    from broker_manager import get_broker
+    success = get_broker().complete_login(request_token)
+    if success:
+        return redirect('/?broker=connected')
+    return jsonify({'error': 'Broker authentication failed'}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 

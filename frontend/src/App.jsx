@@ -20,6 +20,7 @@ import SectorHeatmap from './components/SectorHeatmap';
 import OAuthConsent from './components/OAuthConsent';
 import AdminDashboard from './components/AdminDashboard';
 import AgentInsights from './components/AgentInsights';
+import AutoTrading from './components/AutoTrading';
 import { supabase } from './lib/supabase';
 import wsManager from './utils/websocket';
 import * as apiCache from './utils/apiCache';
@@ -258,6 +259,7 @@ function AppShell() {
     { to: '/chat', icon: MessageSquare, label: 'AI Advisor' },
     { to: '/monitor', icon: Activity, label: 'Monitor' },
     { to: '/insights', icon: Bot, label: 'Agent Insights', badge: unreadInsights },
+    { to: '/auto-trading', icon: Zap, label: 'Auto Trading' },
     ...(userRole === 'admin' ? [{ to: '/admin', icon: Shield, label: 'Admin' }] : []),
   ];
 
@@ -538,6 +540,7 @@ function AppShell() {
                 onInsightRead={() => setUnreadInsights(prev => Math.max(0, prev - 1))}
               />
             } />
+            <Route path="/auto-trading" element={<AutoTrading />} />
             <Route path="/admin" element={
               <AdminRoute><AdminDashboard apiUrl={API_URL} /></AdminRoute>
             } />
