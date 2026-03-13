@@ -204,7 +204,11 @@ export default function AutoTrading() {
         setSessionRunning(true);
         setError('');
         try {
-            const res = await authAxios.post(`${API_URL}/api/auto-trading/run`, {}, { timeout: 180000 });
+            const res = await authAxios.post(
+                `${API_URL}/api/auto-trading/run`,
+                { tickers: selectedTickers },
+                { timeout: 180000 }
+            );
             setSession(res.data);
         } catch (e) {
             setError('Session failed: ' + (e.response?.data?.error || e.message));

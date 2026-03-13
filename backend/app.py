@@ -2372,11 +2372,17 @@ def get_auto_trading_opportunities(user_id):
 @limiter.limit("2 per hour")
 def run_auto_trading_session(user_id):
     """Trigger one autonomous paper-trading session."""
-    from agentic_trader import run_trading_session
-    result = run_trading_session(user_id)
-    if not result:
-        return jsonify({'error': 'Trading session failed — check API key or logs'}), 500
-    return jsonify(result)
+    try:
+        from agentic_trader import run_trading_session
+        body = request.get_json(silent=True) or {}
+        tickers = [t.strip().upper() for t in body.get('tickers', []) if t.strip()] or None
+        result = run_trading_session(user_id, tickers=tickers)
+        if not result:
+            return jsonify({'error': 'Trading session failed — check API key or logs'}), 500
+        return jsonify(result)
+    except Exception as exc:
+        logger.error(f"run_auto_trading_session error: {exc}", exc_info=True)
+        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/api/auto-trading/session/active', methods=['GET'])

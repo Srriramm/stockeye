@@ -152,21 +152,25 @@ TRADING_TOOLS = [
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool executors
 # ─────────────────────────────────────────────────────────────────────────────
-def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str) -> dict:
+def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
+                  user_tickers: list | None = None) -> dict:
     """Execute one trading tool and return a JSON-serialisable dict."""
     try:
         # ── scan_opportunities ────────────────────────────────────────────────
         if name == "scan_opportunities":
             from arbitrage_detector import scan_opportunities
-            from db import get_db_connection
-            with get_db_connection() as conn:
-                rows = conn.execute(
-                    "SELECT ws.ticker FROM watchlist_items ws "
-                    "JOIN watchlists w ON ws.watchlist_id = w.id "
-                    "WHERE w.user_id = ?",
-                    (user_id,)
-                ).fetchall()
-            tickers = [r["ticker"] for r in rows][:20]
+            if user_tickers:
+                tickers = user_tickers
+            else:
+                from db import get_db_connection
+                with get_db_connection() as conn:
+                    rows = conn.execute(
+                        "SELECT ws.ticker FROM watchlist_items ws "
+                        "JOIN watchlists w ON ws.watchlist_id = w.id "
+                        "WHERE w.user_id = ?",
+                        (user_id,)
+                    ).fetchall()
+                tickers = [r["ticker"] for r in rows][:20]
             opps = scan_opportunities(tickers)
             return {"opportunities": opps, "count": len(opps), "tickers_scanned": len(tickers)}
 
@@ -174,28 +178,22 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str) -> dic
         elif name == "get_portfolio_state":
             from trading_manager import get_trading_balance, get_trading_portfolio
             balance   = get_trading_balance(user_id) or {}
-            portfolio = get_trading_portfolio(user_id) or {}
-            holdings  = portfolio.get("holdings", [])
-            invested  = sum(float(h.get("current_value") or 0) for h in holdings)
+            holdings  = get_trading_portfolio(user_id) or []   # list of dicts
+            invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
             avail     = float(balance.get("balance") or 100_000)
             total     = avail + invested
-            daily_pnl = sum(float(h.get("pnl") or 0) for h in holdings)
 
             return {
                 "available_capital":     round(avail, 2),
                 "total_portfolio_value": round(total, 2),
                 "open_positions":        len(holdings),
                 "max_position_size_inr": round(total * MAX_POSITION_PCT, 2),
-                "daily_pnl":             round(daily_pnl, 2),
-                "daily_pnl_pct":         round(daily_pnl / total * 100, 3) if total else 0,
                 "positions": [
                     {
-                        "ticker":        h.get("ticker"),
-                        "quantity":      h.get("quantity"),
-                        "avg_price":     h.get("avg_buy_price"),
-                        "current_price": h.get("current_price"),
-                        "pnl":           h.get("pnl"),
-                        "pnl_pct":       h.get("pnl_pct"),
+                        "ticker":           h.get("ticker"),
+                        "quantity":         h.get("quantity"),
+                        "avg_buy_price":    h.get("avg_buy_price"),
+                        "total_investment": h.get("total_investment"),
                     }
                     for h in holdings
                 ],
@@ -241,9 +239,8 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str) -> dic
                 return {"error": "stop_loss must differ from entry_price"}
 
             balance   = get_trading_balance(user_id) or {}
-            portfolio = get_trading_portfolio(user_id) or {}
-            holdings  = portfolio.get("holdings", [])
-            invested  = sum(float(h.get("current_value") or 0) for h in holdings)
+            holdings  = get_trading_portfolio(user_id) or []   # list of dicts
+            invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
             total     = float(balance.get("balance") or 100_000) + invested
             avail     = float(balance.get("balance") or 100_000)
 
@@ -270,20 +267,16 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str) -> dic
             from trading_manager import (
                 get_trading_portfolio, get_trading_balance, place_order
             )
-            portfolio = get_trading_portfolio(user_id) or {}
-            holdings  = portfolio.get("holdings", [])
+            holdings  = get_trading_portfolio(user_id) or []   # list of dicts
 
             # Hard limit: max open positions
             if len(holdings) >= MAX_OPEN_POSITIONS:
                 return {"error": f"Max {MAX_OPEN_POSITIONS} open positions reached — skipping trade"}
 
-            # Hard limit: daily loss
+            # Hard limit: daily loss (approximate using invested vs balance)
             balance   = get_trading_balance(user_id) or {}
-            invested  = sum(float(h.get("current_value") or 0) for h in holdings)
+            invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
             total     = float(balance.get("balance") or 100_000) + invested
-            daily_pnl = sum(float(h.get("pnl") or 0) for h in holdings)
-            if total > 0 and daily_pnl / total < -MAX_DAILY_LOSS_PCT:
-                return {"error": f"Daily loss limit ({MAX_DAILY_LOSS_PCT*100:.0f}%) hit — no more trades today"}
 
             ticker     = inputs.get("ticker", "").upper()
             side       = inputs.get("side", "BUY")
@@ -310,7 +303,7 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str) -> dic
                     )
                 }
 
-            order = place_order(
+            order_id = place_order(
                 user_id    = user_id,
                 ticker     = ticker,
                 name       = ticker,
@@ -318,10 +311,10 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str) -> dic
                 order_type = order_type,
                 quantity   = quantity,
                 price      = price,
-                stop_price = stop_loss,
+                stop_price = float(stop_loss) if stop_loss else None,
                 limit_price= price if order_type == "LIMIT" else None,
             )
-            if not order:
+            if not order_id:
                 return {"error": "Order placement failed — check trading_manager logs"}
 
             logger.info(
@@ -330,8 +323,8 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str) -> dic
             )
             return {
                 "success":         True,
-                "order_id":        order.get("id"),
-                "status":          order.get("status"),
+                "order_id":        order_id,
+                "status":          "EXECUTED" if order_type == "MARKET" else "PENDING",
                 "ticker":          ticker,
                 "side":            side,
                 "quantity":        quantity,
@@ -364,7 +357,7 @@ def get_active_session(user_id: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Main agentic loop
 # ─────────────────────────────────────────────────────────────────────────────
-def run_trading_session(user_id: str) -> dict | None:
+def run_trading_session(user_id: str, tickers: list | None = None) -> dict | None:
     """
     Run one autonomous paper-trading session for a user.
 
@@ -458,7 +451,7 @@ def run_trading_session(user_id: str) -> dict | None:
                 model = MODEL_DEEP
                 logger.info(f"[{session_id}] Escalated to Sonnet for analysis")
 
-            result = _execute_tool(name, inp, user_id, session_id)
+            result = _execute_tool(name, inp, user_id, session_id, user_tickers=tickers)
 
             # Track executed trades
             if name == "execute_trade" and result.get("success"):
