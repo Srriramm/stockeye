@@ -210,6 +210,8 @@ export default function AutoTrading() {
                 { timeout: 180000 }
             );
             setSession(res.data);
+            // Refresh opportunities panel with same tickers after session completes
+            fetchOpportunities();
         } catch (e) {
             setError('Session failed: ' + (e.response?.data?.error || e.message));
         } finally {
