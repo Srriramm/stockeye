@@ -2369,7 +2369,7 @@ def get_auto_trading_opportunities(user_id):
 
 @app.route('/api/auto-trading/run', methods=['POST'])
 @require_auth
-@limiter.limit("2 per hour")
+@limiter.limit("10 per hour")
 def run_auto_trading_session(user_id):
     """Trigger one autonomous paper-trading session."""
     try:
