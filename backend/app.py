@@ -2337,19 +2337,30 @@ def get_peer_comparison(ticker):
 @app.route('/api/auto-trading/opportunities', methods=['GET'])
 @require_auth
 def get_auto_trading_opportunities(user_id):
-    """Scan market for current arbitrage / statistical opportunities."""
+    """Scan market for current arbitrage / statistical opportunities.
+
+    Query params:
+      tickers=TCS,INFY,RELIANCE  (comma-separated; overrides watchlist if provided)
+    """
     try:
-        from db import execute_query
-        rows = execute_query(
-            "SELECT ws.ticker FROM watchlist_stocks ws "
-            "JOIN watchlists w ON ws.watchlist_id = w.id "
-            "WHERE w.user_id = %s LIMIT 20",
-            (user_id,)
-        ) or []
-        tickers = [r['ticker'] for r in rows]
+        # User-chosen tickers from query param take priority
+        tickers_param = request.args.get('tickers', '').strip()
+        if tickers_param:
+            tickers = [t.strip().upper() for t in tickers_param.split(',') if t.strip()]
+        else:
+            # Fallback: use watchlist
+            from db import execute_query
+            rows = execute_query(
+                "SELECT ws.ticker FROM watchlist_stocks ws "
+                "JOIN watchlists w ON ws.watchlist_id = w.id "
+                "WHERE w.user_id = %s LIMIT 30",
+                (user_id,)
+            ) or []
+            tickers = [r['ticker'] for r in rows]
+
         from arbitrage_detector import scan_opportunities
         opps = scan_opportunities(tickers)
-        return jsonify({'opportunities': opps, 'count': len(opps)})
+        return jsonify({'opportunities': opps, 'count': len(opps), 'tickers_scanned': tickers})
     except Exception as exc:
         logger.error(f"get_auto_trading_opportunities error: {exc}")
         return jsonify({'error': str(exc)}), 500

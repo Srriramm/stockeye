@@ -22,17 +22,6 @@ ETF_MAPPINGS = {
     "SILVERBEES": {"underlying": "SI=F",     "type": "commodity", "expense_ratio": 0.0040, "units_per_gram": 0.01},
 }
 
-# ── Correlated pairs for statistical arbitrage ────────────────────────────────
-CORRELATED_PAIRS = [
-    ("TCS",       "INFY",      "IT sector majors"),
-    ("HDFCBANK",  "ICICIBANK", "Private bank giants"),
-    ("WIPRO",     "HCLTECH",   "Mid-cap IT"),
-    ("ONGC",      "IOC",       "PSU Energy"),
-    ("TITAN",     "KALYANI",   "Jewelry retail"),
-    ("BHARTIARTL","VODAFONEIDEA","Telecom"),
-    ("SBIN",      "BANKBARODA","PSU Banks"),
-    ("MARUTI",    "TATAMOTORS","Auto sector"),
-]
 
 ETF_DIVERGENCE_THRESHOLD = 0.30   # % — minimum premium/discount to flag
 PAIRS_Z_THRESHOLD        = 2.0    # standard deviations
@@ -258,41 +247,75 @@ def detect_bollinger_extreme(ticker: str) -> dict | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dynamic correlation finder
+# ─────────────────────────────────────────────────────────────────────────────
+def find_correlated_pairs(tickers: list, min_correlation: float = 0.75) -> list:
+    """
+    From a list of tickers, find all pairs with Pearson correlation ≥ min_correlation.
+    Returns list of (ticker1, ticker2, correlation) sorted by correlation desc.
+    """
+    from stock_data import get_historical_data
+    from itertools import combinations
+
+    # Fetch 3-month daily closes for all tickers
+    price_series = {}
+    for t in tickers:
+        hist = get_historical_data(t, period="3mo", interval="1d")
+        if hist and len(hist) >= 20:
+            price_series[t] = np.array([bar["close"] for bar in hist], dtype=float)
+
+    pairs = []
+    for t1, t2 in combinations(price_series.keys(), 2):
+        p1, p2 = price_series[t1], price_series[t2]
+        n = min(len(p1), len(p2))
+        if n < 20:
+            continue
+        corr = float(np.corrcoef(p1[-n:], p2[-n:])[0, 1])
+        if corr >= min_correlation:
+            pairs.append((t1, t2, round(corr, 3)))
+
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    return pairs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Full scan
 # ─────────────────────────────────────────────────────────────────────────────
 def scan_opportunities(tickers: list) -> list:
     """
-    Run all three detectors and return opportunities sorted by confidence (desc).
+    Run all three detectors on user-chosen tickers.
 
     Args:
-        tickers: user's watchlist tickers (used for BB scan + pair filtering)
+        tickers: any list of NSE tickers the user wants to scan
     """
     opportunities = []
+    ticker_set = [t.upper().replace(".NS", "").replace(".BO", "") for t in tickers]
 
-    # 1. ETF NAV divergence (fixed list)
-    for etf in ETF_MAPPINGS:
+    # 1. ETF NAV divergence — check if any user ticker is an ETF, plus always check all ETFs
+    etfs_to_scan = set(ETF_MAPPINGS.keys()) | {t for t in ticker_set if t in ETF_MAPPINGS}
+    for etf in etfs_to_scan:
         result = detect_etf_nav_divergence(etf)
         if result:
             opportunities.append(result)
             logger.info(f"ETF divergence: {etf} {result['direction']} {result['premium_pct']:.2f}%")
 
-    # 2. Pairs divergence (only when at least one leg is in the watchlist)
-    ticker_set = {t.upper() for t in tickers}
-    for t1, t2, label in CORRELATED_PAIRS:
-        if t1 in ticker_set or t2 in ticker_set:
-            result = detect_pairs_divergence(t1, t2, label)
+    # 2. Dynamic pairs — find correlated pairs among user's chosen tickers
+    if len(ticker_set) >= 2:
+        correlated = find_correlated_pairs(ticker_set)
+        for t1, t2, corr in correlated[:10]:   # cap at 10 pairs
+            result = detect_pairs_divergence(t1, t2, label=f"corr={corr:.2f}")
             if result:
+                result["correlation"] = corr
                 opportunities.append(result)
-                logger.info(f"Pairs divergence: {t1}/{t2} z={result['z_score']:.2f}")
+                logger.info(f"Pairs divergence: {t1}/{t2} z={result['z_score']:.2f} corr={corr:.2f}")
 
-    # 3. Bollinger extremes on watchlist (cap at 15 to avoid rate limits)
-    for ticker in list(ticker_set)[:15]:
+    # 3. Bollinger extremes on all user tickers
+    for ticker in ticker_set:
         result = detect_bollinger_extreme(ticker)
         if result:
             opportunities.append(result)
             logger.info(f"BB extreme: {ticker} {result['direction']} pos={result['band_position_pct']}%")
 
-    # Sort by confidence descending
     opportunities.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-    logger.info(f"scan_opportunities: {len(opportunities)} opportunities found across {len(tickers)} tickers")
+    logger.info(f"scan_opportunities: {len(opportunities)} found across {len(ticker_set)} tickers")
     return opportunities

@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
+import { authAxios } from '../utils/api';
 import {
     Zap, Play, RefreshCw, TrendingUp, TrendingDown,
     Shield, AlertTriangle, CheckCircle, Clock, BarChart2,
-    Activity, Bot, Link, Layers, Target, DollarSign
+    Activity, Bot, Link, Layers, Target, DollarSign, Plus, X, Search
 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -140,36 +140,62 @@ export default function AutoTrading() {
     const [sessionRunning, setSessionRunning] = useState(false);
     const [brokerStatus, setBrokerStatus]     = useState(null);
     const [error, setError]                   = useState('');
+    const [selectedTickers, setSelectedTickers] = useState([]);
+    const [tickerInput, setTickerInput]         = useState('');
+
+    // ── Ticker picker helpers ────────────────────────────────────────────
+    const addTicker = (raw) => {
+        const parts = raw.toUpperCase().split(/[\s,;]+/).map(t => t.trim()).filter(Boolean);
+        setSelectedTickers(prev => {
+            const existing = new Set(prev);
+            const toAdd = parts.filter(t => t && !existing.has(t));
+            return [...prev, ...toAdd];
+        });
+        setTickerInput('');
+    };
+
+    const removeTicker = (t) => setSelectedTickers(prev => prev.filter(x => x !== t));
+
+    const handleTickerKey = (e) => {
+        if (e.key === 'Enter' || e.key === ',' || e.key === ' ') {
+            e.preventDefault();
+            if (tickerInput.trim()) addTicker(tickerInput);
+        } else if (e.key === 'Backspace' && !tickerInput && selectedTickers.length > 0) {
+            setSelectedTickers(prev => prev.slice(0, -1));
+        }
+    };
 
     // ── Fetch helpers ────────────────────────────────────────────────────
-    const fetchOpportunities = useCallback(async () => {
+    const fetchOpportunities = useCallback(async (tickers) => {
         setOppLoading(true);
         try {
-            const res = await axios.get(`${API_URL}/api/auto-trading/opportunities`);
+            const tickerList = tickers ?? selectedTickers;
+            const params = tickerList.length > 0 ? `?tickers=${tickerList.join(',')}` : '';
+            const res = await authAxios.get(`${API_URL}/api/auto-trading/opportunities${params}`);
             setOpportunities(res.data.opportunities || []);
         } catch (e) {
             setError('Could not load opportunities: ' + (e.response?.data?.error || e.message));
         } finally {
             setOppLoading(false);
         }
-    }, []);
+    }, [selectedTickers]);
 
     const fetchSession = useCallback(async () => {
         try {
-            const res = await axios.get(`${API_URL}/api/auto-trading/session/active`);
+            const res = await authAxios.get(`${API_URL}/api/auto-trading/session/active`);
             setSession(res.data);
         } catch { /* silent */ }
     }, []);
 
     const fetchBroker = useCallback(async () => {
         try {
-            const res = await axios.get(`${API_URL}/api/auto-trading/broker/status`);
+            const res = await authAxios.get(`${API_URL}/api/auto-trading/broker/status`);
             setBrokerStatus(res.data);
         } catch { /* silent */ }
     }, []);
 
     useEffect(() => {
-        fetchOpportunities();
+        fetchOpportunities([]);
         fetchSession();
         fetchBroker();
     }, []);
@@ -179,7 +205,7 @@ export default function AutoTrading() {
         setSessionRunning(true);
         setError('');
         try {
-            const res = await axios.post(`${API_URL}/api/auto-trading/run`);
+            const res = await authAxios.post(`${API_URL}/api/auto-trading/run`);
             setSession(res.data);
         } catch (e) {
             setError('Session failed: ' + (e.response?.data?.error || e.message));
@@ -191,7 +217,7 @@ export default function AutoTrading() {
     // ── Broker connect ───────────────────────────────────────────────────
     const connectBroker = async () => {
         try {
-            const res = await axios.get(`${API_URL}/api/auto-trading/broker/login-url`);
+            const res = await authAxios.get(`${API_URL}/api/auto-trading/broker/login-url`);
             if (res.data.login_url) window.open(res.data.login_url, '_blank');
         } catch (e) {
             setError(e.response?.data?.error || 'Broker connection error');
@@ -230,12 +256,12 @@ export default function AutoTrading() {
                         </div>
                     )}
                     <button
-                        onClick={fetchOpportunities}
+                        onClick={() => fetchOpportunities()}
                         disabled={oppLoading}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50 transition"
                     >
                         <RefreshCw size={12} className={oppLoading ? 'animate-spin' : ''} />
-                        Scan
+                        {selectedTickers.length > 0 ? `Scan (${selectedTickers.length})` : 'Scan Watchlist'}
                     </button>
                     <button
                         onClick={runSession}
@@ -276,6 +302,68 @@ export default function AutoTrading() {
                 <StatCard icon={Layers}     label="Signals Scanned"   value={`${oppsFound || opportunities.length}`} sub="opportunities found" />
             </div>
 
+            {/* ── Stock Picker ── */}
+            <div className="glass-panel p-4">
+                <div className="flex items-center gap-2 mb-3">
+                    <Search size={13} className="text-indigo-400" />
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Scan Specific Stocks</span>
+                    <span className="text-[10px] text-slate-400 ml-1">— type any NSE ticker and press Enter</span>
+                    {selectedTickers.length > 0 && (
+                        <button
+                            onClick={() => setSelectedTickers([])}
+                            className="ml-auto text-[10px] text-slate-400 hover:text-rose-500 transition"
+                        >
+                            Clear all
+                        </button>
+                    )}
+                </div>
+
+                <div className="flex flex-wrap gap-2 items-center min-h-[36px] bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 focus-within:border-indigo-400 focus-within:ring-1 focus-within:ring-indigo-200 transition">
+                    {selectedTickers.map(t => (
+                        <span key={t} className="flex items-center gap-1 text-xs font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-lg">
+                            {t}
+                            <button onClick={() => removeTicker(t)} className="text-indigo-400 hover:text-indigo-700 ml-0.5 leading-none">
+                                <X size={10} />
+                            </button>
+                        </span>
+                    ))}
+                    <input
+                        type="text"
+                        value={tickerInput}
+                        onChange={e => setTickerInput(e.target.value.toUpperCase())}
+                        onKeyDown={handleTickerKey}
+                        onBlur={() => { if (tickerInput.trim()) addTicker(tickerInput); }}
+                        placeholder={selectedTickers.length === 0 ? 'e.g. TCS, INFY, RELIANCE, HDFCBANK…' : 'Add more…'}
+                        className="flex-1 min-w-[160px] bg-transparent text-xs text-slate-700 placeholder:text-slate-400 outline-none"
+                    />
+                </div>
+
+                <div className="flex items-center gap-2 mt-3 flex-wrap">
+                    {/* Quick-add popular tickers */}
+                    <span className="text-[10px] text-slate-400 font-semibold">Quick add:</span>
+                    {['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'NIFTYBEES', 'GOLDBEES', 'BANKBEES'].map(t => (
+                        <button
+                            key={t}
+                            onClick={() => addTicker(t)}
+                            disabled={selectedTickers.includes(t)}
+                            className="text-[10px] font-bold px-2 py-0.5 rounded border transition disabled:opacity-30 disabled:cursor-not-allowed"
+                            style={{ background: selectedTickers.includes(t) ? '#e0e7ff' : '#f8fafc', color: '#4f46e5', borderColor: '#c7d2fe' }}
+                        >
+                            + {t}
+                        </button>
+                    ))}
+                    <button
+                        onClick={() => fetchOpportunities()}
+                        disabled={oppLoading}
+                        className="ml-auto flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-60 transition"
+                        style={{ background: oppLoading ? '#94a3b8' : 'linear-gradient(135deg,#4f46e5,#6d28d9)' }}
+                    >
+                        <Search size={11} />
+                        {selectedTickers.length > 0 ? `Scan ${selectedTickers.length} stock${selectedTickers.length > 1 ? 's' : ''}` : 'Scan Watchlist'}
+                    </button>
+                </div>
+            </div>
+
             {/* ── Main grid ── */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
@@ -301,8 +389,8 @@ export default function AutoTrading() {
                             <BarChart2 size={28} className="text-slate-300 mx-auto mb-3" />
                             <p className="text-sm font-semibold text-slate-500">No opportunities detected</p>
                             <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                                Add stocks to your watchlist, then click Scan to detect ETF arbitrage,<br />
-                                pairs divergence, and Bollinger Band extremes.
+                                Type any NSE tickers above (e.g. TCS, INFY, RELIANCE) and click Scan.<br />
+                                Detects ETF arbitrage, pairs divergence &amp; Bollinger Band extremes.
                             </p>
                         </div>
                     )}
