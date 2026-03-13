@@ -195,7 +195,6 @@ export default function AutoTrading() {
     }, []);
 
     useEffect(() => {
-        fetchOpportunities([]);
         fetchSession();
         fetchBroker();
     }, []);
@@ -205,7 +204,7 @@ export default function AutoTrading() {
         setSessionRunning(true);
         setError('');
         try {
-            const res = await authAxios.post(`${API_URL}/api/auto-trading/run`);
+            const res = await authAxios.post(`${API_URL}/api/auto-trading/run`, {}, { timeout: 180000 });
             setSession(res.data);
         } catch (e) {
             setError('Session failed: ' + (e.response?.data?.error || e.message));

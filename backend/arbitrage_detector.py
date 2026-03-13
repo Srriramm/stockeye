@@ -291,8 +291,11 @@ def scan_opportunities(tickers: list) -> list:
     opportunities = []
     ticker_set = [t.upper().replace(".NS", "").replace(".BO", "") for t in tickers]
 
-    # 1. ETF NAV divergence — check if any user ticker is an ETF, plus always check all ETFs
-    etfs_to_scan = set(ETF_MAPPINGS.keys()) | {t for t in ticker_set if t in ETF_MAPPINGS}
+    # 1. ETF NAV divergence — only scan ETFs the user explicitly chose, or all if no tickers given
+    if ticker_set:
+        etfs_to_scan = {t for t in ticker_set if t in ETF_MAPPINGS}
+    else:
+        etfs_to_scan = set(ETF_MAPPINGS.keys())   # default: scan all when no specific tickers
     for etf in etfs_to_scan:
         result = detect_etf_nav_divergence(etf)
         if result:
