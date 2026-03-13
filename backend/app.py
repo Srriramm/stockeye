@@ -2349,14 +2349,15 @@ def get_auto_trading_opportunities(user_id):
             tickers = [t.strip().upper() for t in tickers_param.split(',') if t.strip()]
         else:
             # Fallback: use watchlist
-            from db import execute_query
-            rows = execute_query(
-                "SELECT ws.ticker FROM watchlist_stocks ws "
-                "JOIN watchlists w ON ws.watchlist_id = w.id "
-                "WHERE w.user_id = %s LIMIT 30",
-                (user_id,)
-            ) or []
-            tickers = [r['ticker'] for r in rows]
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                rows = conn.execute(
+                    "SELECT ws.ticker FROM watchlist_items ws "
+                    "JOIN watchlists w ON ws.watchlist_id = w.id "
+                    "WHERE w.user_id = ?",
+                    (user_id,)
+                ).fetchall()
+            tickers = [r['ticker'] for r in rows][:30]
 
         from arbitrage_detector import scan_opportunities
         opps = scan_opportunities(tickers)
