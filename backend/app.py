@@ -2468,7 +2468,8 @@ def get_advisor_brief(user_id):
         for h in holdings:
             qty  = h.get('quantity', 0)
             cost = h.get('total_investment', 0)
-            lp   = live_prices.get(h['ticker'], {}).get('current_price') or h.get('avg_buy_price', 0)
+            # get_bulk_prices returns {ticker: float}
+            lp   = live_prices.get(h['ticker']) or live_prices.get(h['ticker'].upper()) or h.get('avg_buy_price', 0)
             h['current_price']  = lp
             h['current_value']  = round(qty * lp, 2)
             h['unrealised_pnl'] = round(qty * lp - cost, 2)
