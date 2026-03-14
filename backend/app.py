@@ -1634,7 +1634,7 @@ def reset_trading_account_endpoint(user_id):
     """Reset trading account to starting balance."""
     reset_trading_account(user_id=user_id)
     log_event(user_id, 'account.reset', 'trading_balance')
-    return jsonify({'message': 'Trading account reset to ₹1,00,000'})
+    return jsonify({'message': 'Trading account reset. Add funds to start trading.'})
 
 
 # ═══════════════════════════════════════════════════════════════

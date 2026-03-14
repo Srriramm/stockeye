@@ -492,7 +492,7 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                 <div style={{ width: '100%', display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
                     {resetConfirm ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>Reset to ₹1,00,000? All trades &amp; history will be erased.</span>
+                            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>Reset account? All trades &amp; history will be erased. Balance set to ₹0.</span>
                             <button onClick={handleReset} disabled={resetting} style={{ fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, border: 'none', background: '#ef4444', color: '#fff', cursor: 'pointer' }}>
                                 {resetting ? 'Resetting…' : 'Yes, Reset'}
                             </button>

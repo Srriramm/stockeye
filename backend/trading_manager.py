@@ -89,7 +89,7 @@ def init_trading_tables():
 
 def _ensure_balance(conn, user_id):
     """Insert default balance row for new users if not exists."""
-    conn.execute('INSERT OR IGNORE INTO trading_balance (user_id, balance) VALUES (?, 100000.0)', (user_id,))
+    conn.execute('INSERT OR IGNORE INTO trading_balance (user_id, balance) VALUES (?, 0)', (user_id,))
 
 
 def calculate_charges(price, quantity, side):
@@ -219,7 +219,7 @@ def get_trading_balance(user_id):
     with get_db_connection() as conn:
         _ensure_balance(conn, user_id)
         row = conn.execute('SELECT * FROM trading_balance WHERE user_id=?', (user_id,)).fetchone()
-        return dict(row) if row else {'balance': 100000.0, 'invested': 0, 'pnl': 0}
+        return dict(row) if row else {'balance': 0, 'invested': 0, 'pnl': 0}
 
 
 def reset_trading_account(user_id):
@@ -228,7 +228,7 @@ def reset_trading_account(user_id):
         conn.execute('DELETE FROM trades WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM orders WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM trading_portfolio WHERE user_id=?', (user_id,))
-        conn.execute('UPDATE trading_balance SET balance=100000.0, invested=0, pnl=0 WHERE user_id=?', (user_id,))
+        conn.execute('UPDATE trading_balance SET balance=0, invested=0, pnl=0 WHERE user_id=?', (user_id,))
         # Delete snapshots — table may not exist on older deployments.
         # Use SAVEPOINT on Postgres so a missing-table error can't abort the outer tx.
         if DB_TYPE == 'postgres':
