@@ -33,17 +33,27 @@ MAX_DAILY_LOSS_PCT = 0.02   # 2 % daily loss triggers halt
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an autonomous paper trading agent for Indian equity markets (NSE/BSE).
-Your task: scan for opportunities, reason about risk/reward, and execute disciplined paper trades.
+Your task: scan for opportunities, reason about risk/reward, execute disciplined paper trades,
+and actively manage open positions — including selling when conditions are met.
 
 WORKFLOW (call tools in this order):
-1. scan_opportunities     — get current ETF arbitrage, pairs, and Bollinger signals
-2. get_portfolio_state    — check capital, open positions, daily P&L
-3. analyse_opportunity    — deep-dive into the best 1-2 opportunities
-4. calculate_position_size — risk-based position sizing for each trade
-5. execute_trade          — place paper trade only if setup is high-conviction
-6. submit_session_summary — final report of decisions made
+1. scan_opportunities      — get current ETF arbitrage, pairs, and Bollinger signals
+2. get_portfolio_state     — check capital, open positions with live P&L
+3. execute_trade (SELL)    — exit positions that hit exit rules BEFORE opening new ones
+4. analyse_opportunity     — deep-dive into the best 1-2 opportunities (only if slots remain)
+5. calculate_position_size — risk-based position sizing for each trade
+6. execute_trade (BUY)     — place paper trade only if setup is high-conviction
+7. submit_session_summary  — final report of decisions made
 
-TRADING RULES (strict — follow every rule):
+EXIT RULES — evaluate open positions at step 3; sell if ANY rule triggers:
+- ETF arb:      SELL ALL if NAV discount < 2% (gap closed, trade is done)
+- Pairs long:   SELL ALL if z-score < 1.5σ (mean-reverted — take profit)
+- Partial exit: SELL 50% of position if unrealised gain > 4% (lock in profit, let rest run)
+- Hard stop:    SELL ALL if unrealised loss > 5% (capital protection — no exceptions)
+- News exit:    SELL ALL if negative news sentiment is high for a holding (≥ 3 negative articles)
+- Never re-buy a ticker that is currently in the portfolio
+
+ENTRY RULES (strict — follow every rule):
 - Only trade if expected profit > 0.5% after estimated transaction costs (0.15%)
 - Risk/reward ratio must be ≥ 1.5  (target gain ÷ stop-loss distance)
 - Never exceed 5% of portfolio per position
@@ -53,7 +63,7 @@ TRADING RULES (strict — follow every rule):
 - Always specify a stop-loss when executing
 - Cite specific numbers: spread %, z-score, RSI, expected ₹ profit
 
-Be disciplined and conservative. 1 good trade > 5 mediocre trades."""
+Be disciplined and conservative. Managing exits is as important as finding entries."""
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 TRADING_TOOLS = [
@@ -178,26 +188,39 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
         # ── get_portfolio_state ───────────────────────────────────────────────
         elif name == "get_portfolio_state":
             from trading_manager import get_trading_balance, get_trading_portfolio
-            balance   = get_trading_balance(user_id) or {}
-            holdings  = get_trading_portfolio(user_id) or []   # list of dicts
-            invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
-            avail     = float(balance.get("balance") or 100_000)
-            total     = avail + invested
+            from stock_data import get_bulk_prices
+            balance  = get_trading_balance(user_id) or {}
+            holdings = get_trading_portfolio(user_id) or []
+            prices   = get_bulk_prices([h["ticker"] for h in holdings]) if holdings else {}
+
+            enriched = []
+            for h in holdings:
+                ticker    = h.get("ticker")
+                avg_buy   = float(h.get("avg_buy_price") or 0)
+                qty       = float(h.get("quantity") or 0)
+                cur_price = float(prices.get(ticker) or avg_buy)
+                unreal    = round((cur_price - avg_buy) * qty, 2)
+                pnl_pct   = round((cur_price / avg_buy - 1) * 100, 2) if avg_buy else 0
+                enriched.append({
+                    "ticker":           ticker,
+                    "quantity":         qty,
+                    "avg_buy_price":    avg_buy,
+                    "current_price":    cur_price,
+                    "total_investment": h.get("total_investment"),
+                    "unrealised_pnl":   unreal,
+                    "pnl_pct":          pnl_pct,
+                })
+
+            market_value = sum(p["current_price"] * p["quantity"] for p in enriched)
+            avail        = float(balance.get("balance") or 0)
+            total        = avail + market_value
 
             return {
                 "available_capital":     round(avail, 2),
                 "total_portfolio_value": round(total, 2),
                 "open_positions":        len(holdings),
                 "max_position_size_inr": round(total * MAX_POSITION_PCT, 2),
-                "positions": [
-                    {
-                        "ticker":           h.get("ticker"),
-                        "quantity":         h.get("quantity"),
-                        "avg_buy_price":    h.get("avg_buy_price"),
-                        "total_investment": h.get("total_investment"),
-                    }
-                    for h in holdings
-                ],
+                "positions":             enriched,
             }
 
         # ── analyse_opportunity ───────────────────────────────────────────────
@@ -273,10 +296,17 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             from trading_manager import (
                 get_trading_portfolio, get_trading_balance, place_order
             )
-            holdings  = get_trading_portfolio(user_id) or []   # list of dicts
+            holdings     = get_trading_portfolio(user_id) or []
+            held_tickers = {h["ticker"] for h in holdings}
+            ticker_check = inputs.get("ticker", "").upper()
+            side_check   = inputs.get("side", "BUY")
+
+            # No-rebuy guard
+            if side_check == "BUY" and ticker_check in held_tickers:
+                return {"error": f"Already holding {ticker_check} — sell first or pick a different stock"}
 
             # Hard limit: max open positions
-            if len(holdings) >= MAX_OPEN_POSITIONS:
+            if side_check == "BUY" and len(holdings) >= MAX_OPEN_POSITIONS:
                 return {"error": f"Max {MAX_OPEN_POSITIONS} open positions reached — skipping trade"}
 
             # Hard limit: daily loss (approximate using invested vs balance)
@@ -351,6 +381,41 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Win-rate helper
+# ─────────────────────────────────────────────────────────────────────────────
+def _compute_win_rate(user_id: str) -> float | None:
+    """
+    Return win rate of the last 10 completed (SELL) positions.
+    For each SELL trade, finds the most recent matching BUY and compares prices.
+    Returns None if fewer than 3 sell trades exist (insufficient data).
+    """
+    try:
+        from db import get_db_connection
+        with get_db_connection() as conn:
+            sells = conn.execute(
+                "SELECT ticker, price FROM trades WHERE user_id=? AND side='SELL' "
+                "ORDER BY executed_at DESC LIMIT 10",
+                (user_id,)
+            ).fetchall()
+        if len(sells) < 3:
+            return None
+        wins = 0
+        with get_db_connection() as conn:
+            for sell in sells:
+                buy = conn.execute(
+                    "SELECT price FROM trades WHERE user_id=? AND ticker=? AND side='BUY' "
+                    "ORDER BY executed_at DESC LIMIT 1",
+                    (user_id, sell['ticker'])
+                ).fetchone()
+                if buy and float(sell['price']) > float(buy['price']):
+                    wins += 1
+        return wins / len(sells)
+    except Exception as exc:
+        logger.debug(f"_compute_win_rate failed (non-fatal): {exc}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Active session registry (in-memory; one session per process)
 # ─────────────────────────────────────────────────────────────────────────────
 _active_sessions: dict[str, dict] = {}   # user_id → session dict
@@ -401,14 +466,29 @@ def run_trading_session(user_id: str, tickers: list | None = None,
         f"Your available cash is ₹{available:,.2f}. "
     ) if budget is not None else ""
 
+    # Self-tuning: adjust sizing/criteria based on recent win rate
+    win_rate     = _compute_win_rate(user_id)
+    win_rate_note = ""
+    if win_rate is not None:
+        if win_rate < 0.4:
+            win_rate_note = (
+                f"CAUTION: recent win rate is {win_rate:.0%}. "
+                f"Raise minimum R:R to 2.0 and halve all position sizes. "
+            )
+        elif win_rate > 0.7:
+            win_rate_note = (
+                f"CONFIDENCE: recent win rate is {win_rate:.0%}. Normal sizing applies. "
+            )
+
     messages = [
         {
             "role": "user",
             "content": (
                 f"Run a paper trading session. Today: {date.today().isoformat()}. "
                 f"{budget_note}"
-                f"Start by scanning for opportunities, check portfolio state, "
-                f"then execute 1-2 high-conviction trades if the setup is strong. "
+                f"{win_rate_note}"
+                f"Follow the workflow: first check portfolio state, apply exit rules to "
+                f"open positions, then scan and execute 1-2 high-conviction new trades. "
                 f"Be selective and conservative — only trade if risk/reward ≥ 1.5."
             ),
         }

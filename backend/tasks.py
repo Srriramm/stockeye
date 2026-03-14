@@ -72,6 +72,14 @@ celery_app.conf.update(
             'task': 'tasks.snapshot_all_trading_portfolios',
             'schedule': crontab(hour=16, minute=30),  # 4:30 PM IST — after market close
         },
+        'auto-session-morning': {
+            'task': 'tasks.run_auto_session_all_users',
+            'schedule': crontab(hour=9, minute=15),   # market open IST
+        },
+        'auto-session-evening': {
+            'task': 'tasks.run_auto_session_all_users',
+            'schedule': crontab(hour=15, minute=30),  # pre-close IST
+        },
     },
 )
 
@@ -134,6 +142,28 @@ def run_proactive_evening(self):
     except Exception as exc:
         logger.error(f"Proactive evening analysis failed: {exc}", exc_info=True)
         raise self.retry(exc=exc, countdown=60)
+
+
+@celery_app.task(name='tasks.run_auto_session_all_users', bind=True, max_retries=1)
+def run_auto_session_all_users(self):
+    """Autonomous trading session for all funded accounts — 9:15 AM and 3:30 PM IST."""
+    try:
+        from db import get_db_connection
+        from agentic_trader import run_trading_session
+        with get_db_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT user_id FROM trading_balance WHERE balance > 0"
+            ).fetchall()
+        logger.info(f"Auto-session starting for {len(rows)} user(s)")
+        for row in rows:
+            uid = row['user_id']
+            try:
+                run_trading_session(uid)
+            except Exception as e:
+                logger.error(f"Auto-session failed for user {str(uid)[:8]}: {e}")
+    except Exception as exc:
+        logger.error(f"run_auto_session_all_users failed: {exc}", exc_info=True)
+        raise self.retry(exc=exc, countdown=120)
 
 
 @celery_app.task(name='tasks.snapshot_all_trading_portfolios', bind=True, max_retries=2)

@@ -168,9 +168,15 @@ def _execute_in_conn(conn, user_id, order_id, execution_price, ticker, name, sid
                          (user_id, ticker, name, quantity, execution_price, quantity * execution_price))
 
     elif side == OrderSide.SELL.value:
-        conn.execute('UPDATE trading_balance SET balance=balance+? WHERE user_id=?', (total_amount, user_id))
-        current_qty = conn.execute('SELECT quantity FROM trading_portfolio WHERE user_id=? AND ticker=?',
-                                   (user_id, ticker)).fetchone()[0]
+        # Decrement invested by the cost basis of shares being sold
+        h_row = conn.execute('SELECT avg_buy_price, quantity FROM trading_portfolio WHERE user_id=? AND ticker=?',
+                             (user_id, ticker)).fetchone()
+        cost_basis = float(h_row['avg_buy_price']) * quantity if h_row else 0
+        bal_row = conn.execute('SELECT invested FROM trading_balance WHERE user_id=?', (user_id,)).fetchone()
+        new_invested = max(0.0, float(bal_row['invested'] if bal_row else 0) - cost_basis)
+        conn.execute('UPDATE trading_balance SET balance=balance+?, invested=? WHERE user_id=?',
+                     (total_amount, round(new_invested, 2), user_id))
+        current_qty = h_row[1] if h_row else 0
         new_qty = current_qty - quantity
         if new_qty <= 0:
             conn.execute('DELETE FROM trading_portfolio WHERE user_id=? AND ticker=?', (user_id, ticker))
