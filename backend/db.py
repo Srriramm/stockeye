@@ -60,8 +60,9 @@ _LOCAL_DB = Path(__file__).parent.parent / 'database' / 'stock_assistant.db'
 
 # Maps table → conflict column(s) for INSERT OR REPLACE → ON CONFLICT upsert
 _UPSERT_TARGETS = {
-    'monitored_stocks':    '(user_id, ticker)',   # UNIQUE(user_id, ticker) in schema
-    'portfolio_snapshots': '(snapshot_date)',
+    'monitored_stocks':         '(user_id, ticker)',   # UNIQUE(user_id, ticker) in schema
+    'portfolio_snapshots':      '(snapshot_date)',
+    'trading_daily_snapshots':  '(user_id, date)',
 }
 
 

@@ -223,15 +223,26 @@ def get_trading_balance(user_id):
 
 
 def reset_trading_account(user_id):
+    from db import DB_TYPE
     with get_db_connection() as conn:
         conn.execute('DELETE FROM orders WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM trades WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM trading_portfolio WHERE user_id=?', (user_id,))
         conn.execute('UPDATE trading_balance SET balance=100000.0, invested=0, pnl=0 WHERE user_id=?', (user_id,))
-        try:
-            conn.execute('DELETE FROM trading_daily_snapshots WHERE user_id=?', (user_id,))
-        except Exception:
-            pass  # table may not exist yet on this deployment
+        # Delete snapshots — table may not exist on older deployments.
+        # Use SAVEPOINT on Postgres so a missing-table error can't abort the outer tx.
+        if DB_TYPE == 'postgres':
+            conn.execute('SAVEPOINT sp_snap')
+            try:
+                conn.execute('DELETE FROM trading_daily_snapshots WHERE user_id=?', (user_id,))
+                conn.execute('RELEASE SAVEPOINT sp_snap')
+            except Exception:
+                conn.execute('ROLLBACK TO SAVEPOINT sp_snap')
+        else:
+            try:
+                conn.execute('DELETE FROM trading_daily_snapshots WHERE user_id=?', (user_id,))
+            except Exception:
+                pass
     logger.info(f"Trading account reset for user {user_id[:8]}")
 
 
@@ -259,14 +270,10 @@ def snapshot_portfolio(user_id: str) -> None:
     total       = balance_row['balance'] + invested
     today       = datetime.utcnow().strftime('%Y-%m-%d')
     with get_db_connection() as conn:
-        _ensure_snapshots_table(conn)
-        try:
-            prev = conn.execute(
-                "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT 1",
-                (user_id,)
-            ).fetchone()
-        except Exception:
-            prev = None
+        prev = conn.execute(
+            "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT 1",
+            (user_id,)
+        ).fetchone()
         prev_val = prev['portfolio_value'] if prev else total
         pnl      = round(total - prev_val, 2)
         pnl_pct  = round(pnl / prev_val * 100, 2) if prev_val else 0
@@ -283,14 +290,13 @@ def get_performance_history(user_id: str, days: int = 30) -> list:
     """Return day-wise portfolio snapshots, newest first."""
     try:
         with get_db_connection() as conn:
-            _ensure_snapshots_table(conn)
             rows = conn.execute(
                 "SELECT * FROM trading_daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT ?",
                 (user_id, days)
             ).fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
-        logger.warning(f"get_performance_history failed: {e}")
+        logger.warning(f"get_performance_history: table may not exist yet — {e}")
         return []
 
 
