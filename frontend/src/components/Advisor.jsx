@@ -235,6 +235,8 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
     const [addFundsLoading, setAddFundsLoading] = useState(false);
     const [perfHistory, setPerfHistory] = useState([]);
     const [showReturns, setShowReturns] = useState(false);
+    const [resetConfirm, setResetConfirm] = useState(false);
+    const [resetting, setResetting] = useState(false);
 
     const fetchBrief = useCallback(async () => {
         setLoading(true);
@@ -313,6 +315,21 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
             setError(e.response?.data?.error || 'Failed to add funds');
         } finally {
             setAddFundsLoading(false);
+        }
+    };
+
+    const handleReset = async () => {
+        setResetting(true);
+        try {
+            await authAxios.post(`${API_URL}/api/trading/reset`);
+            setResetConfirm(false);
+            setSession(null);
+            setPerfHistory([]);
+            fetchBrief();
+        } catch (e) {
+            setError(e.response?.data?.error || 'Reset failed');
+        } finally {
+            setResetting(false);
         }
     };
 
@@ -471,6 +488,24 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                         ))}
                     </div>
                 )}
+                {/* Reset */}
+                <div style={{ width: '100%', display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+                    {resetConfirm ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>Reset to ₹1,00,000? All trades &amp; history will be erased.</span>
+                            <button onClick={handleReset} disabled={resetting} style={{ fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, border: 'none', background: '#ef4444', color: '#fff', cursor: 'pointer' }}>
+                                {resetting ? 'Resetting…' : 'Yes, Reset'}
+                            </button>
+                            <button onClick={() => setResetConfirm(false)} style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.2)', background: 'transparent', color: 'rgba(255,255,255,0.6)', cursor: 'pointer' }}>
+                                Cancel
+                            </button>
+                        </div>
+                    ) : (
+                        <button onClick={() => setResetConfirm(true)} style={{ fontSize: 10, fontWeight: 600, padding: '3px 12px', borderRadius: 6, border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.1)', color: 'rgba(239,68,68,0.8)', cursor: 'pointer' }}>
+                            Reset Account
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* ── Daily Returns ── */}

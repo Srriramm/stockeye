@@ -206,6 +206,7 @@ def reset_trading_account(user_id):
         conn.execute('DELETE FROM orders WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM trades WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM trading_portfolio WHERE user_id=?', (user_id,))
+        conn.execute('DELETE FROM trading_daily_snapshots WHERE user_id=?', (user_id,))
         conn.execute('UPDATE trading_balance SET balance=100000.0, invested=0, pnl=0 WHERE user_id=?', (user_id,))
     logger.info(f"Trading account reset for user {user_id[:8]}")
 
