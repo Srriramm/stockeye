@@ -24,8 +24,8 @@ ETF_MAPPINGS = {
 
 
 ETF_DIVERGENCE_THRESHOLD = 0.30   # % — minimum premium/discount to flag
-PAIRS_Z_THRESHOLD        = 2.0    # standard deviations
-BB_EXTREME_THRESHOLD     = 0.95   # band position (0=lower, 1=upper)
+PAIRS_Z_THRESHOLD        = 1.5    # standard deviations (was 2.0 — too strict for daily scans)
+BB_EXTREME_THRESHOLD     = 0.85   # band position (was 0.95 — near band edge, not past it)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,7 +249,7 @@ def detect_bollinger_extreme(ticker: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Dynamic correlation finder
 # ─────────────────────────────────────────────────────────────────────────────
-def find_correlated_pairs(tickers: list, min_correlation: float = 0.75) -> list:
+def find_correlated_pairs(tickers: list, min_correlation: float = 0.60) -> list:
     """
     From a list of tickers, find all pairs with Pearson correlation ≥ min_correlation.
     Returns list of (ticker1, ticker2, correlation) sorted by correlation desc.

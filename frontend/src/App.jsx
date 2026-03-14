@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, LineChart, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, SlidersHorizontal, Grid3X3, LogOut, Shield, Bot } from 'lucide-react';
+import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, Grid3X3, LogOut, Shield, Bot } from 'lucide-react';
 import StockEyeLogo from './components/StockEyeLogo';
 import axios from 'axios';
 import { authAxios } from './utils/api';
@@ -9,21 +9,18 @@ import 'react-toastify/dist/ReactToastify.css';
 
 import { AuthProvider, useAuth } from './context/AuthContext';
 import LoginPage from './components/LoginPage';
-import Dashboard from './components/Dashboard';
+import Advisor from './components/Advisor';
 import Chatbot from './components/Chatbot';
 import Portfolio from './components/PortfolioEnhanced';
 import MarketMonitor from './components/MarketMonitor';
 import Watchlist from './components/Watchlist';
 import Forecast from './components/Forecast';
-import Screener from './components/Screener';
-import SectorHeatmap from './components/SectorHeatmap';
+import Markets from './components/Markets';
 import OAuthConsent from './components/OAuthConsent';
 import AdminDashboard from './components/AdminDashboard';
-import AgentInsights from './components/AgentInsights';
 import AutoTrading from './components/AutoTrading';
 import { supabase } from './lib/supabase';
 import wsManager from './utils/websocket';
-import * as apiCache from './utils/apiCache';
 import { toast } from 'react-toastify';
 
 const API_URL = process.env.REACT_APP_API_URL || '';
@@ -160,8 +157,6 @@ function AppShell() {
   const [liveInsights, setLiveInsights] = useState([]);
   const [unreadInsights, setUnreadInsights] = useState(0);
 
-  const [movers, setMovers] = useState(apiCache.get('movers') || null);
-  const [marketNews, setMarketNews] = useState(apiCache.get('marketNews') || null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -215,31 +210,6 @@ function AppShell() {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    const fetchMoversAndNews = async () => {
-      try {
-        const [moversRes, newsRes] = await Promise.allSettled([
-          axios.get(`${API_URL}/api/market/movers`),
-          axios.get(`${API_URL}/api/news/market`),
-        ]);
-        if (moversRes.status === 'fulfilled') {
-          const data = moversRes.value.data;
-          setMovers(data);
-          apiCache.set('movers', data, 60_000);
-        }
-        if (newsRes.status === 'fulfilled') {
-          const data = newsRes.value.data;
-          setMarketNews(data);
-          apiCache.set('marketNews', data, 60_000);
-        }
-      } catch (err) {
-        console.log('Movers/news fetch error:', err.message);
-      }
-    };
-    if (!apiCache.get('movers') || !apiCache.get('marketNews')) fetchMoversAndNews();
-    const interval = setInterval(fetchMoversAndNews, 60_000);
-    return () => clearInterval(interval);
-  }, []);
 
   const handleSignOut = async () => {
     try {
@@ -250,16 +220,12 @@ function AppShell() {
   };
 
   const navItems = [
-    { to: '/dashboard', icon: BarChart3, label: 'Dashboard' },
-    { to: '/forecast', icon: LineChart, label: 'Forecast' },
-    { to: '/screener', icon: SlidersHorizontal, label: 'Screener' },
-    { to: '/heatmap', icon: Grid3X3, label: 'Heatmap' },
-    { to: '/watchlist', icon: TrendingUp, label: 'Watchlist' },
-    { to: '/portfolio', icon: Briefcase, label: 'Portfolio' },
-    { to: '/chat', icon: MessageSquare, label: 'AI Advisor' },
-    { to: '/monitor', icon: Activity, label: 'Monitor' },
-    { to: '/insights', icon: Bot, label: 'Agent Insights', badge: unreadInsights },
-    { to: '/auto-trading', icon: Zap, label: 'Auto Trading' },
+    { to: '/advisor',     icon: Bot,          label: 'Advisor',   badge: unreadInsights },
+    { to: '/markets',     icon: Grid3X3,      label: 'Markets' },
+    { to: '/watchlist',   icon: TrendingUp,   label: 'Watchlist' },
+    { to: '/portfolio',   icon: Briefcase,    label: 'Portfolio' },
+    { to: '/chat',        icon: MessageSquare, label: 'AI Chat' },
+    { to: '/monitor',     icon: Activity,     label: 'Monitor' },
     ...(userRole === 'admin' ? [{ to: '/admin', icon: Shield, label: 'Admin' }] : []),
   ];
 
@@ -525,26 +491,28 @@ function AppShell() {
         {/* Page content */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
           <Routes>
-            <Route path="/dashboard" element={<Dashboard indices={indices} alerts={alerts} apiUrl={API_URL} movers={movers} marketNews={marketNews} />} />
-            <Route path="/forecast" element={<Forecast apiUrl={API_URL} />} />
-            <Route path="/screener" element={<ScreenerPage apiUrl={API_URL} />} />
-            <Route path="/heatmap" element={<HeatmapPage />} />
-            <Route path="/watchlist" element={<Watchlist apiUrl={API_URL} />} />
-            <Route path="/portfolio" element={<Portfolio apiUrl={API_URL} socket={wsManager.socket} />} />
-            <Route path="/chat" element={<Chatbot apiUrl={API_URL} socket={wsManager.socket} />} />
-            <Route path="/monitor" element={<MarketMonitor apiUrl={API_URL} socket={wsManager.socket} alerts={alerts} />} />
-            <Route path="/insights" element={
-              <AgentInsights
-                apiUrl={API_URL}
+            <Route path="/advisor" element={
+              <Advisor
+                indices={indices}
                 liveInsights={liveInsights}
                 onInsightRead={() => setUnreadInsights(prev => Math.max(0, prev - 1))}
               />
             } />
+            <Route path="/markets" element={<MarketsPage />} />
+            <Route path="/forecast" element={<Forecast apiUrl={API_URL} />} />
+            <Route path="/watchlist" element={<Watchlist apiUrl={API_URL} />} />
+            <Route path="/portfolio" element={<Portfolio apiUrl={API_URL} socket={wsManager.socket} />} />
+            <Route path="/chat" element={<Chatbot apiUrl={API_URL} socket={wsManager.socket} />} />
+            <Route path="/monitor" element={<MarketMonitor apiUrl={API_URL} socket={wsManager.socket} alerts={alerts} />} />
             <Route path="/auto-trading" element={<AutoTrading />} />
             <Route path="/admin" element={
               <AdminRoute><AdminDashboard apiUrl={API_URL} /></AdminRoute>
             } />
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={<Navigate to="/advisor" replace />} />
+            <Route path="/insights" element={<Navigate to="/advisor" replace />} />
+            <Route path="/screener" element={<Navigate to="/markets" replace />} />
+            <Route path="/heatmap" element={<Navigate to="/markets" replace />} />
+            <Route path="*" element={<Navigate to="/advisor" replace />} />
           </Routes>
         </div>
       </main>
@@ -557,24 +525,10 @@ function AppShell() {
   );
 }
 
-// Wrapper provides useNavigate hook to Screener, enabling "Analyse →" to deep-link into Forecast.
-function ScreenerPage({ apiUrl }) {
+function MarketsPage() {
   const navigate = useNavigate();
   return (
-    <Screener
-      apiUrl={apiUrl}
-      onNavigateToForecast={(ticker) => navigate(`/forecast?ticker=${ticker}`)}
-    />
-  );
-}
-
-// Wrapper provides useNavigate hook to SectorHeatmap.
-function HeatmapPage() {
-  const navigate = useNavigate();
-  return (
-    <SectorHeatmap
-      onNavigateToForecast={(ticker) => navigate(`/forecast?ticker=${ticker}`)}
-    />
+    <Markets onNavigateToForecast={(ticker) => navigate(`/forecast?ticker=${ticker}`)} />
   );
 }
 

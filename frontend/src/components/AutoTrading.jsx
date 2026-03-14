@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { authAxios } from '../utils/api';
 import {
     Zap, Play, RefreshCw, TrendingUp, TrendingDown,
@@ -142,6 +142,23 @@ export default function AutoTrading() {
     const [error, setError]                   = useState('');
     const [selectedTickers, setSelectedTickers] = useState([]);
     const [tickerInput, setTickerInput]         = useState('');
+    const [suggestions, setSuggestions]         = useState([]);
+    const [showSuggestions, setShowSuggestions] = useState(false);
+    const [suggLoading, setSuggLoading]         = useState(false);
+    const [activeSugg, setActiveSugg]           = useState(-1);
+    const searchTimeout                         = useRef(null);
+    const pickerRef                             = useRef(null);
+
+    // ── Close dropdown on outside click ─────────────────────────────────
+    useEffect(() => {
+        const handler = (e) => {
+            if (pickerRef.current && !pickerRef.current.contains(e.target)) {
+                setShowSuggestions(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, []);
 
     // ── Ticker picker helpers ────────────────────────────────────────────
     const addTicker = (raw) => {
@@ -152,12 +169,49 @@ export default function AutoTrading() {
             return [...prev, ...toAdd];
         });
         setTickerInput('');
+        setSuggestions([]);
+        setShowSuggestions(false);
+        setActiveSugg(-1);
     };
 
     const removeTicker = (t) => setSelectedTickers(prev => prev.filter(x => x !== t));
 
+    const handleTickerInput = (e) => {
+        const val = e.target.value.toUpperCase();
+        setTickerInput(val);
+        setActiveSugg(-1);
+        clearTimeout(searchTimeout.current);
+        if (val.length < 2) {
+            setSuggestions([]);
+            setShowSuggestions(false);
+            return;
+        }
+        setSuggLoading(true);
+        setShowSuggestions(true);
+        searchTimeout.current = setTimeout(async () => {
+            try {
+                const res = await authAxios.get(`${API_URL}/api/stocks/search?q=${encodeURIComponent(val)}`);
+                setSuggestions(res.data.results || []);
+            } catch {
+                setSuggestions([]);
+            } finally {
+                setSuggLoading(false);
+            }
+        }, 250);
+    };
+
     const handleTickerKey = (e) => {
-        if (e.key === 'Enter' || e.key === ',' || e.key === ' ') {
+        if (showSuggestions && suggestions.length > 0) {
+            if (e.key === 'ArrowDown') { e.preventDefault(); setActiveSugg(i => Math.min(i + 1, suggestions.length - 1)); return; }
+            if (e.key === 'ArrowUp')   { e.preventDefault(); setActiveSugg(i => Math.max(i - 1, -1)); return; }
+            if ((e.key === 'Enter' || e.key === 'Tab') && activeSugg >= 0) {
+                e.preventDefault();
+                addTicker(suggestions[activeSugg].symbol || suggestions[activeSugg].ticker || suggestions[activeSugg]);
+                return;
+            }
+            if (e.key === 'Escape') { setShowSuggestions(false); return; }
+        }
+        if (e.key === 'Enter' || e.key === ',') {
             e.preventDefault();
             if (tickerInput.trim()) addTicker(tickerInput);
         } else if (e.key === 'Backspace' && !tickerInput && selectedTickers.length > 0) {
@@ -312,7 +366,7 @@ export default function AutoTrading() {
                 <div className="flex items-center gap-2 mb-3">
                     <Search size={13} className="text-indigo-400" />
                     <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Scan Specific Stocks</span>
-                    <span className="text-[10px] text-slate-400 ml-1">— type any NSE ticker and press Enter</span>
+                    <span className="text-[10px] text-slate-400 ml-1">— search by name or ticker</span>
                     {selectedTickers.length > 0 && (
                         <button
                             onClick={() => setSelectedTickers([])}
@@ -323,24 +377,56 @@ export default function AutoTrading() {
                     )}
                 </div>
 
-                <div className="flex flex-wrap gap-2 items-center min-h-[36px] bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 focus-within:border-indigo-400 focus-within:ring-1 focus-within:ring-indigo-200 transition">
-                    {selectedTickers.map(t => (
-                        <span key={t} className="flex items-center gap-1 text-xs font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-lg">
-                            {t}
-                            <button onClick={() => removeTicker(t)} className="text-indigo-400 hover:text-indigo-700 ml-0.5 leading-none">
-                                <X size={10} />
-                            </button>
-                        </span>
-                    ))}
-                    <input
-                        type="text"
-                        value={tickerInput}
-                        onChange={e => setTickerInput(e.target.value.toUpperCase())}
-                        onKeyDown={handleTickerKey}
-                        onBlur={() => { if (tickerInput.trim()) addTicker(tickerInput); }}
-                        placeholder={selectedTickers.length === 0 ? 'e.g. TCS, INFY, RELIANCE, HDFCBANK…' : 'Add more…'}
-                        className="flex-1 min-w-[160px] bg-transparent text-xs text-slate-700 placeholder:text-slate-400 outline-none"
-                    />
+                <div ref={pickerRef} className="relative">
+                    <div className="flex flex-wrap gap-2 items-center min-h-[36px] bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 focus-within:border-indigo-400 focus-within:ring-1 focus-within:ring-indigo-200 transition">
+                        {selectedTickers.map(t => (
+                            <span key={t} className="flex items-center gap-1 text-xs font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-lg">
+                                {t}
+                                <button onClick={() => removeTicker(t)} className="text-indigo-400 hover:text-indigo-700 ml-0.5 leading-none">
+                                    <X size={10} />
+                                </button>
+                            </span>
+                        ))}
+                        <input
+                            type="text"
+                            value={tickerInput}
+                            onChange={handleTickerInput}
+                            onKeyDown={handleTickerKey}
+                            onFocus={() => tickerInput.length >= 2 && setShowSuggestions(true)}
+                            placeholder={selectedTickers.length === 0 ? 'Search: TCS, Infosys, Reliance…' : 'Add more…'}
+                            className="flex-1 min-w-[160px] bg-transparent text-xs text-slate-700 placeholder:text-slate-400 outline-none"
+                            autoComplete="off"
+                        />
+                        {suggLoading && (
+                            <div style={{ width: 12, height: 12, borderRadius: '50%', border: '2px solid #e2e8f0', borderTopColor: '#6366f1', animation: 'spin 0.7s linear infinite', flexShrink: 0 }} />
+                        )}
+                    </div>
+
+                    {/* Autocomplete dropdown */}
+                    {showSuggestions && suggestions.length > 0 && (
+                        <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden">
+                            {suggestions.slice(0, 8).map((s, i) => {
+                                const sym  = s.symbol || s.ticker || s;
+                                const name = s.name || s.company_name || '';
+                                const isActive = i === activeSugg;
+                                return (
+                                    <button
+                                        key={sym}
+                                        onMouseDown={(e) => { e.preventDefault(); addTicker(sym); }}
+                                        className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition ${isActive ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}
+                                    >
+                                        <span className="text-xs font-bold text-indigo-700 font-mono w-24 flex-shrink-0">{sym}</span>
+                                        {name && <span className="text-xs text-slate-500 truncate">{name}</span>}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+                    {showSuggestions && !suggLoading && tickerInput.length >= 2 && suggestions.length === 0 && (
+                        <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-lg px-4 py-3 text-xs text-slate-400">
+                            No matches for "{tickerInput}" — press Enter to add anyway
+                        </div>
+                    )}
                 </div>
 
                 <div className="flex items-center gap-2 mt-3 flex-wrap">

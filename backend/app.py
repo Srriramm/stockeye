@@ -2428,6 +2428,108 @@ def broker_oauth_callback():
 
 
 # ═══════════════════════════════════════════════════════════════
+# ADVISOR — unified intelligent broker brief
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/advisor/brief', methods=['GET'])
+@require_auth
+def get_advisor_brief(user_id):
+    """Return a single payload powering the Advisor page:
+    - Latest AI recommendations (entry, target, stop) from recommendation_store
+    - Live arbitrage/statistical opportunities scanned from user's watchlist
+    - Paper-trading portfolio snapshot (balance, holdings, P&L)
+    - Market indices
+    """
+    try:
+        from trading_manager import get_trading_portfolio, get_trading_balance
+        from arbitrage_detector import ETF_MAPPINGS
+
+        # 1. Watchlist tickers (across all user's watchlists)
+        with get_db_connection() as conn:
+            rows = conn.execute(
+                'SELECT DISTINCT ticker FROM watchlist_items WHERE user_id = ?',
+                (user_id,)
+            ).fetchall()
+        watchlist_tickers = [r['ticker'] for r in rows]
+
+        # 2. Latest AI recommendations from recommendation_store (already have prices)
+        recommendations = get_recommendations(user_id, limit=15)
+
+        # 3. Portfolio snapshot
+        holdings = get_trading_portfolio(user_id) or []
+        balance_info = get_trading_balance(user_id) or {'balance': 100000.0, 'invested': 0, 'pnl': 0}
+
+        # Compute live P&L for holdings
+        tickers_held    = [h['ticker'] for h in holdings]
+        live_prices     = get_bulk_prices(tickers_held) if tickers_held else {}
+        portfolio_value = balance_info.get('balance', 0)
+        total_invested  = 0
+        for h in holdings:
+            qty  = h.get('quantity', 0)
+            cost = h.get('total_investment', 0)
+            lp   = live_prices.get(h['ticker'], {}).get('current_price') or h.get('avg_buy_price', 0)
+            h['current_price']  = lp
+            h['current_value']  = round(qty * lp, 2)
+            h['unrealised_pnl'] = round(qty * lp - cost, 2)
+            h['pnl_pct']        = round((qty * lp - cost) / cost * 100, 2) if cost else 0
+            portfolio_value    += qty * lp
+            total_invested     += cost
+
+        unrealised_pnl = round(portfolio_value - balance_info.get('balance', 0) - total_invested, 2)
+
+        # 4. Market indices
+        try:
+            indices = get_market_indices()
+        except Exception:
+            indices = {}
+
+        return jsonify({
+            'recommendations': recommendations,
+            'watchlist_tickers': watchlist_tickers,
+            'portfolio': {
+                'balance':       round(balance_info.get('balance', 0), 2),
+                'invested':      round(total_invested, 2),
+                'portfolio_value': round(portfolio_value, 2),
+                'unrealised_pnl': unrealised_pnl,
+                'holdings':      holdings,
+                'holdings_count': len(holdings),
+            },
+            'indices': indices,
+        })
+
+    except Exception as exc:
+        logger.error(f"get_advisor_brief error: {exc}", exc_info=True)
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/advisor/scan', methods=['POST'])
+@require_auth
+@limiter.limit("20 per hour")
+def advisor_scan(user_id):
+    """Scan for live market opportunities using user's watchlist (or provided tickers)."""
+    try:
+        from arbitrage_detector import scan_opportunities, ETF_MAPPINGS
+
+        body    = request.get_json(silent=True) or {}
+        tickers = body.get('tickers', [])
+
+        if not tickers:
+            with get_db_connection() as conn:
+                rows = conn.execute(
+                    'SELECT DISTINCT ticker FROM watchlist_items WHERE user_id = ?',
+                    (user_id,)
+                ).fetchall()
+            tickers = [r['ticker'] for r in rows]
+
+        opps = scan_opportunities(tickers or list(ETF_MAPPINGS.keys()))
+        return jsonify({'opportunities': opps, 'count': len(opps)})
+
+    except Exception as exc:
+        logger.error(f"advisor_scan error: {exc}", exc_info=True)
+        return jsonify({'error': str(exc)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 
