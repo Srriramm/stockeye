@@ -4,6 +4,7 @@ All public functions require user_id as the first parameter.
 """
 
 import logging
+from datetime import datetime
 from enum import Enum
 from db import get_db_connection
 
@@ -51,6 +52,17 @@ def init_trading_tables():
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL UNIQUE,
             balance REAL DEFAULT 100000.0, invested REAL DEFAULT 0, pnl REAL DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS trading_daily_snapshots (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    TEXT NOT NULL,
+            date       TEXT NOT NULL,
+            portfolio_value REAL,
+            cash_balance    REAL,
+            invested        REAL,
+            pnl             REAL,
+            pnl_pct         REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, date))''')
     logger.info("Trading tables initialized")
 
 
@@ -196,6 +208,56 @@ def reset_trading_account(user_id):
         conn.execute('DELETE FROM trading_portfolio WHERE user_id=?', (user_id,))
         conn.execute('UPDATE trading_balance SET balance=100000.0, invested=0, pnl=0 WHERE user_id=?', (user_id,))
     logger.info(f"Trading account reset for user {user_id[:8]}")
+
+
+def add_funds(user_id: str, amount: float) -> dict:
+    """Add paper money to user's trading wallet."""
+    if amount <= 0 or amount > 10_000_000:
+        raise ValueError("Amount must be between ₹1 and ₹1,00,00,000")
+    with get_db_connection() as conn:
+        _ensure_balance(conn, user_id)
+        conn.execute(
+            'UPDATE trading_balance SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?',
+            (amount, user_id)
+        )
+        row = conn.execute('SELECT * FROM trading_balance WHERE user_id = ?', (user_id,)).fetchone()
+    return dict(row)
+
+
+def snapshot_portfolio(user_id: str) -> None:
+    """Save today's portfolio value snapshot for daily return tracking."""
+    from stock_data import get_bulk_prices
+    holdings    = get_trading_portfolio(user_id)
+    balance_row = get_trading_balance(user_id)
+    prices      = get_bulk_prices([h['ticker'] for h in holdings]) if holdings else {}
+    invested    = sum(h['quantity'] * (prices.get(h['ticker']) or h['avg_buy_price']) for h in holdings)
+    total       = balance_row['balance'] + invested
+    today       = datetime.utcnow().strftime('%Y-%m-%d')
+    with get_db_connection() as conn:
+        prev = conn.execute(
+            "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        prev_val = prev['portfolio_value'] if prev else total
+        pnl      = round(total - prev_val, 2)
+        pnl_pct  = round(pnl / prev_val * 100, 2) if prev_val else 0
+        conn.execute(
+            "INSERT OR REPLACE INTO trading_daily_snapshots "
+            "(user_id, date, portfolio_value, cash_balance, invested, pnl, pnl_pct) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, today, round(total, 2), round(balance_row['balance'], 2),
+             round(invested, 2), pnl, pnl_pct)
+        )
+
+
+def get_performance_history(user_id: str, days: int = 30) -> list:
+    """Return day-wise portfolio snapshots, newest first."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trading_daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT ?",
+            (user_id, days)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # Backward-compat shim: expose execute_order for any external callers

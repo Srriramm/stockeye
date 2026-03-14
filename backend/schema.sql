@@ -169,6 +169,22 @@ CREATE TABLE IF NOT EXISTS trading_balance (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS trading_daily_snapshots (
+    id              SERIAL PRIMARY KEY,
+    user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    date            TEXT NOT NULL,
+    portfolio_value REAL,
+    cash_balance    REAL,
+    invested        REAL,
+    pnl             REAL,
+    pnl_pct         REAL,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, date)
+);
+ALTER TABLE trading_daily_snapshots ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS idx_trading_snapshots_user
+    ON trading_daily_snapshots(user_id, date DESC);
+
 -- ─── Conversations ───────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -202,8 +218,9 @@ ALTER TABLE watchlist_items     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE advanced_alerts     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trades              ENABLE ROW LEVEL SECURITY;
-ALTER TABLE trading_portfolio   ENABLE ROW LEVEL SECURITY;
-ALTER TABLE trading_balance     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trading_portfolio          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trading_balance            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trading_daily_snapshots    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_messages ENABLE ROW LEVEL SECURITY;
 
@@ -215,7 +232,7 @@ BEGIN
         'holdings','monitored_stocks','alerts','price_alerts',
         'portfolio_snapshots','watchlists','watchlist_items',
         'advanced_alerts','orders','trades','trading_portfolio',
-        'trading_balance','conversations','conversation_messages'
+        'trading_balance','trading_daily_snapshots','conversations','conversation_messages'
     ] LOOP
         EXECUTE format('DROP POLICY IF EXISTS own_rows ON %I', t);
         EXECUTE format('

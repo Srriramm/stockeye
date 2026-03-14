@@ -79,7 +79,8 @@ from watchlist_manager import (
 from trading_manager import (
     place_order, execute_order, cancel_order, get_order_by_id,
     get_orders, get_trades, get_trading_portfolio, get_trading_balance,
-    reset_trading_account, OrderType, OrderSide
+    reset_trading_account, add_funds, snapshot_portfolio, get_performance_history,
+    OrderType, OrderSide
 )
 from stock_screener import screen_stocks, get_predefined_screens, get_sectors
 from advanced_alerts import (
@@ -2374,15 +2375,42 @@ def run_auto_trading_session(user_id):
     """Trigger one autonomous paper-trading session."""
     try:
         from agentic_trader import run_trading_session
-        body = request.get_json(silent=True) or {}
+        body    = request.get_json(silent=True) or {}
         tickers = [t.strip().upper() for t in body.get('tickers', []) if t.strip()] or None
-        result = run_trading_session(user_id, tickers=tickers)
+        budget  = float(body['budget']) if body.get('budget') else None
+        result  = run_trading_session(user_id, tickers=tickers, budget=budget)
         if not result:
             return jsonify({'error': 'Trading session failed — check API key or logs'}), 500
         return jsonify(result)
     except Exception as exc:
         logger.error(f"run_auto_trading_session error: {exc}", exc_info=True)
         return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/auto-trading/wallet/add', methods=['POST'])
+@require_auth
+@limiter.limit("20 per hour")
+def add_wallet_funds(user_id):
+    """Add paper money to user's trading wallet."""
+    try:
+        body   = request.get_json(silent=True) or {}
+        amount = float(body.get('amount', 0))
+        result = add_funds(user_id, amount)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as exc:
+        logger.error(f"add_wallet_funds error: {exc}", exc_info=True)
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/auto-trading/performance', methods=['GET'])
+@require_auth
+def get_trading_performance(user_id):
+    """Daily return history for the paper trading portfolio."""
+    days    = min(int(request.args.get('days', 30)), 365)
+    history = get_performance_history(user_id, days)
+    return jsonify({'history': history, 'count': len(history)})
 
 
 @app.route('/api/auto-trading/session/active', methods=['GET'])

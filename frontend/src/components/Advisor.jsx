@@ -229,6 +229,12 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
     const [session, setSession]       = useState(null);
     const [running, setRunning]       = useState(false);
     const [error, setError]           = useState('');
+    const [budget, setBudget]         = useState('');
+    const [addFundsAmt, setAddFundsAmt] = useState('');
+    const [addFundsOpen, setAddFundsOpen] = useState(false);
+    const [addFundsLoading, setAddFundsLoading] = useState(false);
+    const [perfHistory, setPerfHistory] = useState([]);
+    const [showReturns, setShowReturns] = useState(false);
 
     const fetchBrief = useCallback(async () => {
         setLoading(true);
@@ -255,6 +261,9 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
     useEffect(() => {
         fetchBrief();
         scanOpps();
+        authAxios.get(`${API_URL}/api/auto-trading/performance?days=14`)
+            .then(r => setPerfHistory(r.data.history || []))
+            .catch(() => {});
     }, [fetchBrief, scanOpps]);
 
     // Merge live WebSocket insights
@@ -273,19 +282,37 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
         setRunning(true);
         setError('');
         try {
-            // Use scan_tickers (watchlist + monitored + live movers) — no hardcoding
-            const res = await authAxios.post(
-                `${API_URL}/api/auto-trading/run`,
-                { tickers: brief?.scan_tickers || brief?.watchlist_tickers || [] },
-                { timeout: 180000 }
-            );
+            const body = { tickers: brief?.scan_tickers || brief?.watchlist_tickers || [] };
+            if (budget && !isNaN(parseFloat(budget)) && parseFloat(budget) > 0) {
+                body.budget = parseFloat(budget);
+            }
+            const res = await authAxios.post(`${API_URL}/api/auto-trading/run`, body, { timeout: 180000 });
             setSession(res.data);
             fetchBrief();
             scanOpps();
+            authAxios.get(`${API_URL}/api/auto-trading/performance?days=14`)
+                .then(r => setPerfHistory(r.data.history || []))
+                .catch(() => {});
         } catch (e) {
             setError('Agent session failed: ' + (e.response?.data?.error || e.message));
         } finally {
             setRunning(false);
+        }
+    };
+
+    const handleAddFunds = async () => {
+        const amount = parseFloat(addFundsAmt);
+        if (!amount || amount <= 0) return;
+        setAddFundsLoading(true);
+        try {
+            await authAxios.post(`${API_URL}/api/auto-trading/wallet/add`, { amount });
+            setAddFundsAmt('');
+            setAddFundsOpen(false);
+            fetchBrief();
+        } catch (e) {
+            setError(e.response?.data?.error || 'Failed to add funds');
+        } finally {
+            setAddFundsLoading(false);
         }
     };
 
@@ -343,6 +370,17 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                         <RefreshCw size={12} style={{ animation: loading ? 'spin 0.8s linear infinite' : 'none' }} />
                         Refresh
                     </button>
+                    {/* Budget input */}
+                    <div style={{ display: 'flex', alignItems: 'center', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' }}>
+                        <span style={{ fontSize: 13, color: '#64748b', padding: '0 8px 0 12px', fontWeight: 600 }}>₹</span>
+                        <input
+                            type="number"
+                            placeholder="Budget (optional)"
+                            value={budget}
+                            onChange={e => setBudget(e.target.value)}
+                            style={{ border: 'none', background: 'transparent', fontSize: 13, color: '#0f172a', width: 140, padding: '8px 12px 8px 0', outline: 'none' }}
+                        />
+                    </div>
                     <button
                         onClick={runSession}
                         disabled={running}
@@ -388,8 +426,33 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                         </div>
                     )}
                 </div>
-                <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
-                    <PortfolioStat label="Cash Balance" value={loading ? '—' : fmt(portfolio.balance)} color="#fff" />
+                <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                    {/* Cash Balance with Add Funds */}
+                    <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>Cash Balance</div>
+                        <div style={{ fontSize: 20, fontWeight: 800, fontFamily: 'monospace', color: '#fff' }}>{loading ? '—' : fmt(portfolio.balance)}</div>
+                        {addFundsOpen ? (
+                            <div style={{ display: 'flex', gap: 4, marginTop: 6, justifyContent: 'center' }}>
+                                <input
+                                    type="number"
+                                    placeholder="Amount"
+                                    value={addFundsAmt}
+                                    onChange={e => setAddFundsAmt(e.target.value)}
+                                    onKeyDown={e => { if (e.key === 'Enter') handleAddFunds(); if (e.key === 'Escape') setAddFundsOpen(false); }}
+                                    autoFocus
+                                    style={{ width: 90, fontSize: 11, padding: '4px 7px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.3)', background: 'rgba(255,255,255,0.1)', color: '#fff', outline: 'none' }}
+                                />
+                                <button onClick={handleAddFunds} disabled={addFundsLoading} style={{ fontSize: 11, fontWeight: 700, padding: '4px 8px', borderRadius: 6, border: 'none', background: '#4ade80', color: '#14532d', cursor: 'pointer' }}>
+                                    {addFundsLoading ? '…' : 'Add'}
+                                </button>
+                                <button onClick={() => setAddFundsOpen(false)} style={{ fontSize: 11, padding: '4px 6px', borderRadius: 6, border: 'none', background: 'rgba(255,255,255,0.1)', color: '#fff', cursor: 'pointer' }}>✕</button>
+                            </div>
+                        ) : (
+                            <button onClick={() => setAddFundsOpen(true)} style={{ fontSize: 10, fontWeight: 700, marginTop: 5, padding: '3px 10px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.7)', cursor: 'pointer' }}>
+                                + Add Funds
+                            </button>
+                        )}
+                    </div>
                     <PortfolioStat label="Invested" value={loading ? '—' : fmt(portfolio.invested)} color="#c7d2fe" />
                     <PortfolioStat label="Positions" value={loading ? '—' : portfolio.holdings_count || 0} color="#a5b4fc" sub="open holdings" />
                     <PortfolioStat label="P&L" value={loading ? '—' : fmt(portfolio.unrealised_pnl)} color={(portfolio.unrealised_pnl || 0) >= 0 ? '#4ade80' : '#f87171'} />
@@ -406,6 +469,61 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                                 </span>
                             </div>
                         ))}
+                    </div>
+                )}
+            </div>
+
+            {/* ── Daily Returns ── */}
+            <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 14, marginBottom: 24, overflow: 'hidden' }}>
+                <button
+                    onClick={() => setShowReturns(v => !v)}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 18px', background: 'none', border: 'none', cursor: 'pointer' }}
+                >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                        <Activity size={14} style={{ color: '#4f46e5' }} />
+                        <span style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>Daily Returns History</span>
+                        {perfHistory.length > 0 && (
+                            <span style={{ fontSize: 11, fontWeight: 600, color: '#64748b', background: '#f1f5f9', borderRadius: 5, padding: '2px 8px' }}>
+                                {perfHistory.length} days
+                            </span>
+                        )}
+                    </div>
+                    <span style={{ fontSize: 12, color: '#94a3b8' }}>{showReturns ? '▲' : '▼'}</span>
+                </button>
+                {showReturns && (
+                    <div style={{ padding: '0 18px 14px' }}>
+                        {perfHistory.length === 0 ? (
+                            <p style={{ fontSize: 12, color: '#94a3b8', margin: 0 }}>No trading history yet — run a session to start tracking.</p>
+                        ) : (
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                <thead>
+                                    <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
+                                        {['Date', 'Portfolio Value', 'Cash', 'Invested', 'Daily P&L', '%'].map(h => (
+                                            <th key={h} style={{ textAlign: 'left', padding: '6px 8px', fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {perfHistory.map((row, i) => {
+                                        const isPos = (row.pnl || 0) >= 0;
+                                        return (
+                                            <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', color: '#475569' }}>{row.date}</td>
+                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', fontWeight: 700, color: '#0f172a' }}>{fmt(row.portfolio_value)}</td>
+                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', color: '#64748b' }}>{fmt(row.cash_balance)}</td>
+                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', color: '#64748b' }}>{fmt(row.invested)}</td>
+                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', fontWeight: 700, color: isPos ? '#15803d' : '#b91c1c' }}>
+                                                    {isPos ? '+' : ''}{fmt(row.pnl)}
+                                                </td>
+                                                <td style={{ padding: '7px 8px', fontWeight: 700, color: isPos ? '#15803d' : '#b91c1c' }}>
+                                                    {isPos ? '+' : ''}{Number(row.pnl_pct || 0).toFixed(2)}%
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        )}
                     </div>
                 )}
             </div>

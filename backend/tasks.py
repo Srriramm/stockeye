@@ -68,6 +68,10 @@ celery_app.conf.update(
             'task': 'tasks.run_proactive_evening',
             'schedule': crontab(hour=16, minute=0),  # 4:00 PM IST — post-market
         },
+        'snapshot-trading-portfolios': {
+            'task': 'tasks.snapshot_all_trading_portfolios',
+            'schedule': crontab(hour=16, minute=30),  # 4:30 PM IST — after market close
+        },
     },
 )
 
@@ -129,4 +133,23 @@ def run_proactive_evening(self):
         run_analysis_for_all_users(session='evening')
     except Exception as exc:
         logger.error(f"Proactive evening analysis failed: {exc}", exc_info=True)
+        raise self.retry(exc=exc, countdown=60)
+
+
+@celery_app.task(name='tasks.snapshot_all_trading_portfolios', bind=True, max_retries=2)
+def snapshot_all_trading_portfolios(self):
+    """Daily snapshot of all users' paper trading portfolios — 4:30 PM IST."""
+    try:
+        from trading_manager import snapshot_portfolio
+        from db import get_db_connection
+        with get_db_connection() as conn:
+            rows = conn.execute("SELECT DISTINCT user_id FROM trading_balance").fetchall()
+        for row in rows:
+            try:
+                snapshot_portfolio(row['user_id'])
+            except Exception as e:
+                logger.error(f"Snapshot failed for user {str(row['user_id'])[:8]}: {e}")
+        logger.info(f"Trading snapshots saved for {len(rows)} user(s)")
+    except Exception as exc:
+        logger.error(f"snapshot_all_trading_portfolios failed: {exc}", exc_info=True)
         raise self.retry(exc=exc, countdown=60)

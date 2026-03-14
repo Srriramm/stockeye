@@ -153,7 +153,8 @@ TRADING_TOOLS = [
 # Tool executors
 # ─────────────────────────────────────────────────────────────────────────────
 def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
-                  user_tickers: list | None = None) -> dict:
+                  user_tickers: list | None = None,
+                  budget: float | None = None) -> dict:
     """Execute one trading tool and return a JSON-serialisable dict."""
     try:
         # ── scan_opportunities ────────────────────────────────────────────────
@@ -243,9 +244,11 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
             total     = float(balance.get("balance") or 100_000) + invested
             avail     = float(balance.get("balance") or 100_000)
+            # If a session budget was set, cap position sizing to that budget
+            ref_capital  = min(budget, avail) if budget is not None else total
 
-            max_capital  = total * MAX_POSITION_PCT
-            risk_capital = total * min(risk_pct, 0.02)          # cap individual risk at 2%
+            max_capital  = ref_capital * MAX_POSITION_PCT
+            risk_capital = ref_capital * min(risk_pct, 0.02)    # cap individual risk at 2%
             qty_risk     = int(risk_capital / risk_per_share)
             qty_capital  = int(max_capital / entry)
             quantity     = max(1, min(qty_risk, qty_capital))
@@ -357,13 +360,19 @@ def get_active_session(user_id: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Main agentic loop
 # ─────────────────────────────────────────────────────────────────────────────
-def run_trading_session(user_id: str, tickers: list | None = None) -> dict | None:
+def run_trading_session(user_id: str, tickers: list | None = None,
+                        budget: float | None = None) -> dict | None:
     """
     Run one autonomous paper-trading session for a user.
+
+    Args:
+        budget: Optional cap on capital to deploy in this session (INR).
+                If None, the full available balance is usable.
 
     Returns a structured session summary dict or None on failure.
     """
     import anthropic
+    from trading_manager import get_trading_balance
 
     session_id = f"trade-{user_id[:8]}-{datetime.now().strftime('%H%M%S')}"
     _active_sessions[user_id] = {"session_id": session_id, "status": "running", "user_id": user_id}
@@ -373,16 +382,28 @@ def run_trading_session(user_id: str, tickers: list | None = None) -> dict | Non
         logger.error("ANTHROPIC_API_KEY not set — agentic trader unavailable")
         return None
 
+    # Determine usable capital for this session
+    balance_row    = get_trading_balance(user_id) or {}
+    available      = float(balance_row.get('balance') or 0)
+    usable_capital = min(float(budget), available) if budget is not None else available
+
     client  = anthropic.Anthropic(api_key=api_key)
     model   = MODEL_FAST
     trades  = []
     session_result = None
+
+    budget_note = (
+        f"BUDGET FOR THIS SESSION: ₹{usable_capital:,.2f}. "
+        f"Do NOT deploy more than ₹{usable_capital:,.2f} total across all trades. "
+        f"Your available cash is ₹{available:,.2f}. "
+    ) if budget is not None else ""
 
     messages = [
         {
             "role": "user",
             "content": (
                 f"Run a paper trading session. Today: {date.today().isoformat()}. "
+                f"{budget_note}"
                 f"Start by scanning for opportunities, check portfolio state, "
                 f"then execute 1-2 high-conviction trades if the setup is strong. "
                 f"Be selective and conservative — only trade if risk/reward ≥ 1.5."
@@ -451,7 +472,8 @@ def run_trading_session(user_id: str, tickers: list | None = None) -> dict | Non
                 model = MODEL_DEEP
                 logger.info(f"[{session_id}] Escalated to Sonnet for analysis")
 
-            result = _execute_tool(name, inp, user_id, session_id, user_tickers=tickers)
+            result = _execute_tool(name, inp, user_id, session_id,
+                                   user_tickers=tickers, budget=budget)
 
             # Track executed trades
             if name == "execute_trade" and result.get("success"):
@@ -498,4 +520,12 @@ def run_trading_session(user_id: str, tickers: list | None = None) -> dict | Non
         f"capital_deployed=₹{session_result.get('total_capital_deployed',0):,.0f}, "
         f"model={model}"
     )
+
+    # Save daily snapshot so return history is always up to date after a session
+    try:
+        from trading_manager import snapshot_portfolio
+        snapshot_portfolio(user_id)
+    except Exception as snap_exc:
+        logger.warning(f"[{session_id}] Snapshot failed (non-fatal): {snap_exc}")
+
     return final
