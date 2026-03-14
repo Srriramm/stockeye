@@ -2454,7 +2454,7 @@ def get_advisor_brief(user_id):
                 (user_id,)
             ).fetchall()
             alert_rows = conn.execute(
-                'SELECT DISTINCT ticker FROM price_alerts WHERE user_id = ? AND is_triggered = FALSE',
+                'SELECT DISTINCT ticker FROM price_alerts WHERE user_id = ? AND triggered = FALSE',
                 (user_id,)
             ).fetchall()
         watchlist_tickers = [r['ticker'] for r in wl_rows]
