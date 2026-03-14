@@ -2441,6 +2441,7 @@ def get_advisor_brief(user_id):
     - Market indices
     """
     try:
+        from db import get_db_connection
         from trading_manager import get_trading_portfolio, get_trading_balance
         from arbitrage_detector import ETF_MAPPINGS
 
@@ -2508,6 +2509,7 @@ def get_advisor_brief(user_id):
 def advisor_scan(user_id):
     """Scan for live market opportunities using user's watchlist (or provided tickers)."""
     try:
+        from db import get_db_connection
         from arbitrage_detector import scan_opportunities, ETF_MAPPINGS
 
         body    = request.get_json(silent=True) or {}
