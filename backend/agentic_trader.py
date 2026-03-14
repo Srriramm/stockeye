@@ -121,7 +121,7 @@ TRADING_TOOLS = [
                 "ticker":     {"type": "string"},
                 "side":       {"type": "string", "enum": ["BUY", "SELL"]},
                 "quantity":   {"type": "integer", "minimum": 1},
-                "order_type": {"type": "string", "enum": ["MARKET", "LIMIT"]},
+                "order_type": {"type": "string", "enum": ["MARKET"]},
                 "price":      {"type": "number", "description": "Limit price (required for LIMIT orders)"},
                 "stop_loss":  {"type": "number", "description": "Stop-loss price (INR)"},
                 "reasoning":  {"type": "string", "description": "1-2 sentences: why this trade, what signal triggered it"},
@@ -284,7 +284,7 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             ticker     = inputs.get("ticker", "").upper()
             side       = inputs.get("side", "BUY")
             quantity   = int(inputs.get("quantity") or 1)
-            order_type = inputs.get("order_type", "MARKET")
+            order_type = "MARKET"  # paper trading always executes immediately
             price      = float(inputs.get("price") or 0)
             stop_loss  = inputs.get("stop_loss")
 
