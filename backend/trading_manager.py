@@ -225,8 +225,8 @@ def get_trading_balance(user_id):
 def reset_trading_account(user_id):
     from db import DB_TYPE
     with get_db_connection() as conn:
-        conn.execute('DELETE FROM orders WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM trades WHERE user_id=?', (user_id,))
+        conn.execute('DELETE FROM orders WHERE user_id=?', (user_id,))
         conn.execute('DELETE FROM trading_portfolio WHERE user_id=?', (user_id,))
         conn.execute('UPDATE trading_balance SET balance=100000.0, invested=0, pnl=0 WHERE user_id=?', (user_id,))
         # Delete snapshots — table may not exist on older deployments.
