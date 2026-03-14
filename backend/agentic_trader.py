@@ -244,10 +244,13 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
             total     = float(balance.get("balance") or 100_000) + invested
             avail     = float(balance.get("balance") or 100_000)
-            # If a session budget was set, cap position sizing to that budget
-            ref_capital  = min(budget, avail) if budget is not None else total
-
-            max_capital  = ref_capital * MAX_POSITION_PCT
+            # If a session budget was set, split it evenly across max positions
+            if budget is not None:
+                ref_capital  = min(float(budget), avail)
+                max_capital  = ref_capital / MAX_OPEN_POSITIONS  # e.g. 13000/3 = ~4333
+            else:
+                ref_capital  = total
+                max_capital  = ref_capital * MAX_POSITION_PCT
             risk_capital = ref_capital * min(risk_pct, 0.02)    # cap individual risk at 2%
             qty_risk     = int(risk_capital / risk_per_share)
             qty_capital  = int(max_capital / entry)

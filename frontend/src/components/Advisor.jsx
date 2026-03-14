@@ -433,9 +433,9 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
             {/* ── Portfolio Snapshot ── */}
             <div style={{ background: 'linear-gradient(135deg,#1e1b4b,#312e81)', borderRadius: 18, padding: '20px 28px', marginBottom: 24, display: 'flex', alignItems: 'center', gap: 32, flexWrap: 'wrap' }}>
                 <div style={{ flex: 1, minWidth: 180 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Paper Portfolio Value</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Invested Value</div>
                     <div style={{ fontSize: 28, fontWeight: 900, fontFamily: 'monospace', color: '#fff' }}>
-                        {loading ? '—' : fmt(portfolio.portfolio_value)}
+                        {loading ? '—' : fmt(portfolio.invested || 0)}
                     </div>
                     {portfolio.unrealised_pnl != null && (
                         <div style={{ fontSize: 13, fontWeight: 700, color: (portfolio.unrealised_pnl || 0) >= 0 ? '#4ade80' : '#f87171', marginTop: 4 }}>
@@ -533,7 +533,7 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                                 <thead>
                                     <tr style={{ borderBottom: '1px solid #e2e8f0' }}>
-                                        {['Date', 'Portfolio Value', 'Cash', 'Invested', 'Daily P&L', '%'].map(h => (
+                                        {['Date', 'Wallet Balance', 'Invested', 'Daily P&L', '%'].map(h => (
                                             <th key={h} style={{ textAlign: 'left', padding: '6px 8px', fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
                                         ))}
                                     </tr>
@@ -544,8 +544,7 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                                         return (
                                             <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
                                                 <td style={{ padding: '7px 8px', fontFamily: 'monospace', color: '#475569' }}>{row.date}</td>
-                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', fontWeight: 700, color: '#0f172a' }}>{fmt(row.portfolio_value)}</td>
-                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', color: '#64748b' }}>{fmt(row.cash_balance)}</td>
+                                                <td style={{ padding: '7px 8px', fontFamily: 'monospace', fontWeight: 700, color: '#0f172a' }}>{fmt(row.cash_balance)}</td>
                                                 <td style={{ padding: '7px 8px', fontFamily: 'monospace', color: '#64748b' }}>{fmt(row.invested)}</td>
                                                 <td style={{ padding: '7px 8px', fontFamily: 'monospace', fontWeight: 700, color: isPos ? '#15803d' : '#b91c1c' }}>
                                                     {isPos ? '+' : ''}{fmt(row.pnl)}
