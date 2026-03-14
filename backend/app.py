@@ -2445,13 +2445,34 @@ def get_advisor_brief(user_id):
         from trading_manager import get_trading_portfolio, get_trading_balance
         from arbitrage_detector import ETF_MAPPINGS
 
-        # 1. Watchlist tickers (across all user's watchlists)
+        from portfolio_manager import get_monitored_stocks
+
+        # 1. User's personal tickers: watchlist + monitored + portfolio holdings
         with get_db_connection() as conn:
-            rows = conn.execute(
+            wl_rows = conn.execute(
                 'SELECT DISTINCT ticker FROM watchlist_items WHERE user_id = ?',
                 (user_id,)
             ).fetchall()
-        watchlist_tickers = [r['ticker'] for r in rows]
+            alert_rows = conn.execute(
+                'SELECT DISTINCT ticker FROM price_alerts WHERE user_id = ? AND is_triggered = FALSE',
+                (user_id,)
+            ).fetchall()
+        watchlist_tickers = [r['ticker'] for r in wl_rows]
+        alert_tickers     = [r['ticker'] for r in alert_rows]
+        monitored         = [s['ticker'] for s in (get_monitored_stocks(user_id) or [])]
+
+        # 2. Live market movers — dynamically fetched, no hardcoding
+        try:
+            movers      = get_top_gainers_losers()
+            mover_tickers = [s['ticker'] for s in movers.get('gainers', [])] + \
+                            [s['ticker'] for s in movers.get('losers', [])]
+        except Exception:
+            mover_tickers = []
+
+        # Merge all sources, deduplicated, personal tickers first
+        scan_tickers = list(dict.fromkeys(
+            watchlist_tickers + monitored + alert_tickers + mover_tickers
+        ))
 
         # 2. Latest AI recommendations from recommendation_store (already have prices)
         recommendations = get_recommendations(user_id, limit=15)
@@ -2488,6 +2509,7 @@ def get_advisor_brief(user_id):
         return jsonify({
             'recommendations': recommendations,
             'watchlist_tickers': watchlist_tickers,
+            'scan_tickers': scan_tickers,   # watchlist + popular defaults when watchlist is small
             'portfolio': {
                 'balance':       round(balance_info.get('balance', 0), 2),
                 'invested':      round(total_invested, 2),
@@ -2513,18 +2535,32 @@ def advisor_scan(user_id):
         from db import get_db_connection
         from arbitrage_detector import scan_opportunities, ETF_MAPPINGS
 
+        from portfolio_manager import get_monitored_stocks
+
         body    = request.get_json(silent=True) or {}
         tickers = body.get('tickers', [])
 
         if not tickers:
+            # Build scan universe purely from user data + live market signals
             with get_db_connection() as conn:
-                rows = conn.execute(
+                wl_rows = conn.execute(
                     'SELECT DISTINCT ticker FROM watchlist_items WHERE user_id = ?',
                     (user_id,)
                 ).fetchall()
-            tickers = [r['ticker'] for r in rows]
+            watchlist = [r['ticker'] for r in wl_rows]
+            monitored = [s['ticker'] for s in (get_monitored_stocks(user_id) or [])]
 
-        opps = scan_opportunities(tickers or list(ETF_MAPPINGS.keys()))
+            # Live market movers — dynamic, changes every day
+            try:
+                movers = get_top_gainers_losers()
+                mover_tickers = [s['ticker'] for s in movers.get('gainers', [])] + \
+                                [s['ticker'] for s in movers.get('losers', [])]
+            except Exception:
+                mover_tickers = []
+
+            tickers = list(dict.fromkeys(watchlist + monitored + mover_tickers))
+
+        opps = scan_opportunities(tickers) if tickers else []
         return jsonify({'opportunities': opps, 'count': len(opps)})
 
     except Exception as exc:

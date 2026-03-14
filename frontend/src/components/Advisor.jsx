@@ -273,9 +273,10 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
         setRunning(true);
         setError('');
         try {
+            // Use scan_tickers (watchlist + monitored + live movers) — no hardcoding
             const res = await authAxios.post(
                 `${API_URL}/api/auto-trading/run`,
-                { tickers: brief?.watchlist_tickers || [] },
+                { tickers: brief?.scan_tickers || brief?.watchlist_tickers || [] },
                 { timeout: 180000 }
             );
             setSession(res.data);
@@ -320,7 +321,13 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
                         {greeting()}, here's your briefing
                     </h1>
                     <p style={{ fontSize: 13, color: '#64748b', margin: '4px 0 0', lineHeight: 1.5 }}>
-                        Your autonomous AI broker — entry prices, targets, and stop-losses automatically derived from technical analysis and market signals.
+                        Your autonomous AI broker — scanning{' '}
+                        <strong style={{ color: '#4f46e5' }}>
+                            {brief?.scan_tickers?.length
+                                ? `${brief.scan_tickers.length} stocks`
+                                : 'your watchlist + live market movers'}
+                        </strong>
+                        {' '}· entry prices, targets &amp; stop-losses from live technical analysis.
                     </p>
                 </div>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
