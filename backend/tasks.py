@@ -158,7 +158,12 @@ def run_auto_session_all_users(self):
         for row in rows:
             uid = row['user_id']
             try:
-                run_trading_session(uid)
+                from trading_manager import get_trading_balance
+                bal = get_trading_balance(uid) or {}
+                avail = float(bal.get('balance') or 0)
+                # Use 60% of available balance as session budget so cash reserve stays
+                budget = round(avail * 0.6, 2) if avail > 500 else None
+                run_trading_session(uid, budget=budget)
             except Exception as e:
                 logger.error(f"Auto-session failed for user {str(uid)[:8]}: {e}")
     except Exception as exc:

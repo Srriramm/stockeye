@@ -361,8 +361,17 @@ def analyze_stock_for_user(user_id: str, ticker: str,
         "manual":  "On-demand analysis",
     }.get(session, "Analysis")
 
+    # Include shared platform intelligence (autonomous trades, monitor alerts, advisor chats)
+    intel_block = ""
+    try:
+        from shared_context import get_context_summary
+        intel_block = get_context_summary(user_id, max_age_hours=12)
+    except Exception:
+        pass
+
     user_message = (
         f"Analyze {ticker} (NSE/BSE India) — {session_label} as of {now_str}.\n"
+        f"{intel_block}"
         f"Gather the necessary data using tools, then submit your recommendation."
     )
 
@@ -469,6 +478,13 @@ def analyze_stock_for_user(user_id: str, ticker: str,
 
     # Cache to avoid redundant API calls within the same session
     _set_cache(user_id, ticker, session, recommendation)
+
+    # Publish to shared intelligence bus so other modules can see this signal
+    try:
+        from shared_context import signal_from_recommendation
+        signal_from_recommendation(user_id, ticker, recommendation)
+    except Exception:
+        pass
 
     # Persist to DB
     try:

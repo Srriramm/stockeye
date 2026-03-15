@@ -270,25 +270,27 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             # If a session budget was set, split it evenly across max positions
             if budget is not None:
                 ref_capital  = min(float(budget), avail)
-                max_capital  = ref_capital / MAX_OPEN_POSITIONS  # e.g. 13000/3 = ~4333
+                # Budget mode: split evenly across slots — use capital sizing, not risk sizing
+                slot_capital = ref_capital / MAX_OPEN_POSITIONS  # e.g. 9000/3 = ₹3000
+                quantity     = max(1, int(slot_capital / entry))
             else:
                 ref_capital  = total
                 max_capital  = ref_capital * MAX_POSITION_PCT
-            risk_capital = ref_capital * min(risk_pct, 0.02)    # cap individual risk at 2%
-            qty_risk     = int(risk_capital / risk_per_share)
-            qty_capital  = int(max_capital / entry)
-            quantity     = max(1, min(qty_risk, qty_capital))
+                risk_capital = ref_capital * min(risk_pct, 0.02)
+                qty_risk     = int(risk_capital / risk_per_share)
+                qty_capital  = int(max_capital / entry)
+                quantity     = max(1, min(qty_risk, qty_capital))
 
+            capital_required = round(quantity * entry, 2)
             return {
                 "ticker":                ticker,
                 "quantity":              quantity,
                 "entry_price":           entry,
                 "stop_loss":             stop,
-                "capital_required":      round(quantity * entry, 2),
+                "capital_required":      capital_required,
                 "capital_at_risk":       round(quantity * risk_per_share, 2),
-                "risk_pct_of_portfolio": round(quantity * risk_per_share / total * 100, 2),
                 "available_capital":     round(avail, 2),
-                "within_limits":         quantity * entry <= avail,
+                "within_limits":         capital_required <= avail,
             }
 
         # ── execute_trade ─────────────────────────────────────────────────────
@@ -352,6 +354,14 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             )
             if not order_id:
                 return {"error": "Order placement failed — check trading_manager logs"}
+
+            # Publish to shared intelligence bus
+            try:
+                from shared_context import signal_from_trade
+                signal_from_trade(user_id, ticker, side, quantity, price,
+                                  reasoning=inputs.get("reasoning", ""))
+            except Exception:
+                pass
 
             logger.info(
                 f"[AutoTrader:{session_id}] {side} {quantity}x{ticker} @ ₹{price:.2f} | "
@@ -460,11 +470,21 @@ def run_trading_session(user_id: str, tickers: list | None = None,
     trades  = []
     session_result = None
 
+    per_slot = usable_capital / MAX_OPEN_POSITIONS if budget is not None else 0
     budget_note = (
-        f"BUDGET FOR THIS SESSION: ₹{usable_capital:,.2f}. "
-        f"Do NOT deploy more than ₹{usable_capital:,.2f} total across all trades. "
+        f"BUDGET FOR THIS SESSION: ₹{usable_capital:,.2f} split across up to {MAX_OPEN_POSITIONS} positions "
+        f"(≈₹{per_slot:,.0f} per stock). "
+        f"AIM TO FILL ALL {MAX_OPEN_POSITIONS} SLOTS — scan broadly and pick the best {MAX_OPEN_POSITIONS} opportunities. "
+        f"Do not stop at 1 trade if more opportunities exist. "
         f"Your available cash is ₹{available:,.2f}. "
     ) if budget is not None else ""
+
+    # Shared intelligence from other modules (proactive agent, monitor alerts)
+    try:
+        from shared_context import get_context_summary
+        intel_block = get_context_summary(user_id, max_age_hours=12)
+    except Exception:
+        intel_block = ""
 
     # Self-tuning: adjust sizing/criteria based on recent win rate
     win_rate     = _compute_win_rate(user_id)
@@ -487,9 +507,12 @@ def run_trading_session(user_id: str, tickers: list | None = None,
                 f"Run a paper trading session. Today: {date.today().isoformat()}. "
                 f"{budget_note}"
                 f"{win_rate_note}"
+                f"{intel_block}"
                 f"Follow the workflow: first check portfolio state, apply exit rules to "
                 f"open positions, then scan and execute 1-2 high-conviction new trades. "
-                f"Be selective and conservative — only trade if risk/reward ≥ 1.5."
+                f"Prioritise tickers flagged as bullish in the platform intelligence above. "
+                f"Avoid tickers flagged as bearish unless the reversal case is very clear. "
+                f"Only trade if risk/reward ≥ 1.5."
             ),
         }
     ]
@@ -610,5 +633,12 @@ def run_trading_session(user_id: str, tickers: list | None = None,
         snapshot_portfolio(user_id)
     except Exception as snap_exc:
         logger.warning(f"[{session_id}] Snapshot failed (non-fatal): {snap_exc}")
+
+    # Push Telegram notification
+    try:
+        from telegram_notify import send_trade_summary
+        send_trade_summary(final)
+    except Exception:
+        pass
 
     return final

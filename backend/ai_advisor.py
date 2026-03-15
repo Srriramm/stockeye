@@ -275,13 +275,22 @@ Please provide your analysis and advice based on the above real-time data."""
         }
 
 
-def get_stock_advice_dual(user_query, provider='auto', conversation_history=None, **context):
+def get_ai_response(user_query, conversation_history=None, user_id=None, **context):
+    """Thin wrapper — called by telegram_bot and other modules."""
+    result = get_stock_advice_dual(user_query, provider='auto',
+                                   conversation_history=conversation_history,
+                                   user_id=user_id, **context)
+    return result.get('response', '')
+
+
+def get_stock_advice_dual(user_query, provider='auto', conversation_history=None, user_id=None, **context):
     """
     Get AI-powered stock advice with dual provider support (OpenAI + Anthropic).
 
     Args:
         user_query: User's question
         provider: 'auto', 'openai', or 'anthropic'
+        user_id: Supabase user_id — used to load shared platform intelligence
         conversation_history: List of prior {role, content} messages for this user's session.
                               Never pass a global list — always load per-user history from DB.
         **context: stock_data, news_data, portfolio_data, technicals
@@ -312,11 +321,24 @@ def get_stock_advice_dual(user_query, provider='auto', conversation_history=None
         else:
             provider = None
 
+    # Load shared platform intelligence for this user
+    intel_block = ""
+    if user_id:
+        try:
+            from shared_context import get_context_summary
+            intel_block = get_context_summary(user_id, max_age_hours=12)
+        except Exception:
+            pass
+
     # Route to appropriate provider
     if provider == 'anthropic' and anthropic_client:
-        return _query_anthropic(user_query, query_type, conversation_history=conversation_history, **context)
+        return _query_anthropic(user_query, query_type,
+                                conversation_history=conversation_history,
+                                intel_block=intel_block, **context)
     elif provider == 'openai' and openai_client:
-        return _query_openai(user_query, query_type, conversation_history=conversation_history, **context)
+        return _query_openai(user_query, query_type,
+                             conversation_history=conversation_history,
+                             intel_block=intel_block, **context)
     else:
         return {
             'response': 'AI service unavailable — please configure OPENAI_API_KEY or ANTHROPIC_API_KEY.',
@@ -327,7 +349,7 @@ def get_stock_advice_dual(user_query, provider='auto', conversation_history=None
         }
 
 
-def _query_openai(user_query, query_type, conversation_history=None, **context):
+def _query_openai(user_query, query_type, conversation_history=None, intel_block="", **context):
     """Query OpenAI GPT-4 using per-user conversation history loaded from DB."""
     if conversation_history is None:
         conversation_history = []
@@ -339,6 +361,11 @@ def _query_openai(user_query, query_type, conversation_history=None, **context):
         context.get('portfolio_data'),
         context.get('technicals')
     )
+
+    # Build system prompt — inject shared platform intelligence if available
+    system = SYSTEM_PROMPT
+    if intel_block:
+        system = SYSTEM_PROMPT + "\n\n" + intel_block
 
     # Build user message
     user_message = user_query
@@ -352,7 +379,7 @@ def _query_openai(user_query, query_type, conversation_history=None, **context):
 Please provide your analysis and advice based on the above real-time data."""
 
     # Build messages for API using per-user history (no global state)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": system}]
 
     for msg in conversation_history[-MAX_HISTORY:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
@@ -400,7 +427,7 @@ Please provide your analysis and advice based on the above real-time data."""
         }
 
 
-def _query_anthropic(user_query, query_type, conversation_history=None, **context):
+def _query_anthropic(user_query, query_type, conversation_history=None, intel_block="", **context):
     """Query Anthropic Claude using per-user conversation history loaded from DB."""
     if conversation_history is None:
         conversation_history = []
@@ -416,6 +443,9 @@ def _query_anthropic(user_query, query_type, conversation_history=None, **contex
         context.get('portfolio_data'),
         context.get('technicals')
     )
+
+    # Inject shared platform intelligence into system prompt
+    system = SYSTEM_PROMPT + ("\n\n" + intel_block if intel_block else "")
 
     # Build messages using per-user history (no global state)
     messages = []
@@ -442,7 +472,7 @@ Please provide your analysis and advice based on the above real-time data."""
                 model=model,
                 max_tokens=max_tokens,
                 temperature=0.7,
-                system=SYSTEM_PROMPT,
+                system=system,
                 messages=messages,
                 timeout=45,
             )

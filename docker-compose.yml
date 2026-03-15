@@ -110,6 +110,28 @@ services:
     healthcheck:
       disable: true
 
+  # ─── Telegram Bot ────────────────────────────────────────────
+  telegram:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockeye-telegram
+    command: python telegram_bot.py
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./database:/app/database
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - stockeye-network
+    healthcheck:
+      disable: true
+
   # ─── MCP Server Service ───────────────────────────────────────
   mcp-server:
     build:

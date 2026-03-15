@@ -617,6 +617,7 @@ def chat(user_id):
     result = get_stock_advice_dual(
         user_message,
         provider=provider,
+        user_id=user_id,
         conversation_history=prior_messages,
         stock_data=stock_data,
         news_data=news_data,

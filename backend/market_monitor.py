@@ -66,7 +66,7 @@ def set_socketio(sio):
 
 
 def emit_alert(alert_data):
-    """Send alert to frontend via WebSocket."""
+    """Send alert to frontend via WebSocket and publish to shared intelligence bus."""
     if socketio_instance:
         try:
             socketio_instance.emit('new_alert', alert_data, namespace='/')
@@ -76,6 +76,17 @@ def emit_alert(alert_data):
         print(f"[ALERT] {alert_data.get('message', 'No message')}")
     except UnicodeEncodeError:
         print(f"[ALERT] {alert_data.get('ticker', '?')} alert fired ({alert_data.get('type', 'unknown')})")
+
+    # Publish to shared intelligence bus so AI Advisor & Autonomous Trader see it
+    try:
+        user_id = alert_data.get('user_id')
+        ticker  = alert_data.get('ticker')
+        message = alert_data.get('message', '')
+        if user_id and ticker and message:
+            from shared_context import signal_from_alert
+            signal_from_alert(user_id, ticker, alert_data.get('type', 'alert'), message)
+    except Exception:
+        pass
 
 
 # ─── Monitoring Service ────────────────────────────────────────
@@ -195,6 +206,7 @@ class MonitoringService:
                         'id': alert_id, 'ticker': ticker, 'type': 'price_movement',
                         'message': alert_msg, 'severity': severity,
                         'timestamp': datetime.now().isoformat(),
+                        'user_id': user_id,
                     })
                     self._set_cooldown(ticker, 'price_movement')
 
@@ -226,6 +238,7 @@ class MonitoringService:
                         'id': alert_id, 'ticker': ticker, 'type': 'volume_spike',
                         'message': alert_msg, 'severity': 'warning',
                         'timestamp': datetime.now().isoformat(),
+                        'user_id': user_id,
                     })
                     self._set_cooldown(ticker, 'volume_spike')
 
@@ -246,6 +259,7 @@ class MonitoringService:
                         'ticker': ticker, 'type': 'technical',
                         'message': alert_msg, 'severity': 'warning',
                         'timestamp': datetime.now().isoformat(),
+                        'user_id': user_id,
                     })
                     self._set_cooldown(ticker, 'technical')
 
@@ -257,6 +271,7 @@ class MonitoringService:
                         'ticker': ticker, 'type': 'technical',
                         'message': alert_msg, 'severity': 'info',
                         'timestamp': datetime.now().isoformat(),
+                        'user_id': user_id,
                     })
                     self._set_cooldown(ticker, 'technical')
 
@@ -275,6 +290,7 @@ class MonitoringService:
                             'ticker': ticker, 'type': 'pattern',
                             'message': alert_msg, 'severity': 'info',
                             'timestamp': datetime.now().isoformat(),
+                            'user_id': user_id,
                         })
                         self._set_cooldown(ticker, 'pattern')
         except Exception as e:
@@ -299,6 +315,7 @@ class MonitoringService:
                     'ticker': ticker, 'type': 'news',
                     'message': alert_msg, 'severity': 'warning',
                     'timestamp': datetime.now().isoformat(),
+                    'user_id': user_id,
                 })
                 self._set_cooldown(ticker, 'news')
 
@@ -324,6 +341,7 @@ class MonitoringService:
                     'id': alert_id, 'ticker': ticker, 'type': 'booming',
                     'message': alert_msg, 'severity': 'critical',
                     'timestamp': datetime.now().isoformat(),
+                    'user_id': user_id,
                 })
                 self._set_cooldown(ticker, 'booming')
 
@@ -357,6 +375,7 @@ class MonitoringService:
                         'ticker': ticker, 'type': 'price_alert',
                         'message': alert_msg, 'severity': 'critical',
                         'timestamp': datetime.now().isoformat(),
+                        'user_id': user_id,
                     })
         except Exception as e:
             logger.error(f"Price alerts check error: {e}")
@@ -490,6 +509,7 @@ class MonitoringService:
                 'id': alert_id, 'ticker': ticker, 'type': 'signal',
                 'message': alert_msg, 'severity': severity,
                 'timestamp': datetime.now().isoformat(),
+                'user_id': user_id,
             })
             self._set_cooldown(ticker, 'signal')
 
