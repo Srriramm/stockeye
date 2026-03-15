@@ -191,7 +191,10 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             from stock_data import get_bulk_prices
             balance  = get_trading_balance(user_id) or {}
             holdings = get_trading_portfolio(user_id) or []
-            prices   = get_bulk_prices([h["ticker"] for h in holdings]) if holdings else {}
+            try:
+                prices = get_bulk_prices([h["ticker"] for h in holdings]) if holdings else {}
+            except Exception:
+                prices = {}
 
             enriched = []
             for h in holdings:
