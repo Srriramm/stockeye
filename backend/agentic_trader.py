@@ -441,8 +441,37 @@ def get_active_session(user_id: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Main agentic loop
 # ─────────────────────────────────────────────────────────────────────────────
+_SESSION_LOCK_TTL = 900   # seconds — max time a session can hold the lock before auto-expiry
+
+
+def _acquire_session_lock(user_id: str) -> bool:
+    """Try to acquire a Redis-backed session lock. Returns True if acquired."""
+    try:
+        from cache import _get_redis
+        r = _get_redis()
+        if r:
+            key = f"session_lock:{user_id}"
+            return bool(r.set(key, "1", nx=True, ex=_SESSION_LOCK_TTL))
+    except Exception:
+        pass
+    # Redis unavailable — fall back to in-memory check
+    session = _active_sessions.get(user_id)
+    return not (session and session.get("status") == "running")
+
+
+def _release_session_lock(user_id: str) -> None:
+    try:
+        from cache import _get_redis
+        r = _get_redis()
+        if r:
+            r.delete(f"session_lock:{user_id}")
+    except Exception:
+        pass
+
+
 def run_trading_session(user_id: str, tickers: list | None = None,
-                        budget: float | None = None) -> dict | None:
+                        budget: float | None = None,
+                        notify: bool = True) -> dict | None:
     """
     Run one autonomous paper-trading session for a user.
 
@@ -450,10 +479,15 @@ def run_trading_session(user_id: str, tickers: list | None = None,
         budget: Optional cap on capital to deploy in this session (INR).
                 If None, the full available balance is usable.
 
-    Returns a structured session summary dict or None on failure.
+    Returns a structured session summary dict, {"already_running": True} if
+    another session is active, or None on failure.
     """
     import anthropic
     from trading_manager import get_trading_balance
+
+    if not _acquire_session_lock(user_id):
+        logger.info(f"[{user_id[:8]}] Session already running — skipping duplicate.")
+        return {"already_running": True, "trades": [], "reasoning": "A session is already in progress."}
 
     session_id = f"trade-{user_id[:8]}-{datetime.now().strftime('%H%M%S')}"
     _active_sessions[user_id] = {"session_id": session_id, "status": "running", "user_id": user_id}
@@ -461,6 +495,7 @@ def run_trading_session(user_id: str, tickers: list | None = None,
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         logger.error("ANTHROPIC_API_KEY not set — agentic trader unavailable")
+        _release_session_lock(user_id)
         return None
 
     # Determine usable capital for this session
@@ -637,11 +672,13 @@ def run_trading_session(user_id: str, tickers: list | None = None,
     except Exception as snap_exc:
         logger.warning(f"[{session_id}] Snapshot failed (non-fatal): {snap_exc}")
 
-    # Push Telegram notification
-    try:
-        from telegram_notify import send_trade_summary
-        send_trade_summary(final)
-    except Exception:
-        pass
+    # Push Telegram notification (skip when caller handles its own reply, e.g. telegram_bot.py)
+    if notify:
+        try:
+            from telegram_notify import send_trade_summary
+            send_trade_summary(final)
+        except Exception:
+            pass
 
+    _release_session_lock(user_id)
     return final

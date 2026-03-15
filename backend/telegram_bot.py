@@ -162,9 +162,12 @@ async def cmd_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     def _run_in_thread():
         try:
             from agentic_trader import run_trading_session
-            result = run_trading_session(USER_ID, budget=budget)
+            result = run_trading_session(USER_ID, budget=budget, notify=False)
             if not result:
                 _tg_send("⚠️ Session finished with no result.")
+                return
+            if result.get("already_running"):
+                _tg_send("⏳ A session is already running — please wait for it to finish.")
                 return
 
             trades  = result.get("trades", [])
@@ -178,7 +181,10 @@ async def cmd_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"{emoji}  <b>{t.get('ticker')}</b>  "
                     f"{t.get('quantity')}×  ₹{t.get('execution_price', 0):.2f}"
                 )
-            lines.append(f"\n💬 {reason[:300]}")
+            # Truncate cleanly at word boundary
+            if len(reason) > 300:
+                reason = reason[:300].rsplit(" ", 1)[0] + "…"
+            lines.append(f"\n💬 {reason}")
             _tg_send("\n".join(lines))
         except Exception as exc:
             _tg_send(f"❌ Session error: {exc}")
