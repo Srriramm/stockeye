@@ -181,9 +181,9 @@ async def cmd_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"{emoji}  <b>{t.get('ticker')}</b>  "
                     f"{t.get('quantity')}×  ₹{t.get('execution_price', 0):.2f}"
                 )
-            # Truncate cleanly at word boundary
-            if len(reason) > 300:
-                reason = reason[:300].rsplit(" ", 1)[0] + "…"
+            # Truncate cleanly at word boundary (Telegram limit is 4096, keep reasoning readable)
+            if len(reason) > 800:
+                reason = reason[:800].rsplit(" ", 1)[0] + "…"
             lines.append(f"\n💬 {reason}")
             _tg_send("\n".join(lines))
         except Exception as exc:
