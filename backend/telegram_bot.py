@@ -311,12 +311,23 @@ async def _do_chat(update: Update, text: str):
         return
     await update.message.reply_text("🤔 Thinking...")
     try:
-        from conversation_manager import get_conversation_history, save_conversation_message
+        from conversation_manager import (
+            get_conversations, create_conversation, get_messages, add_message
+        )
         from ai_advisor import get_ai_response
-        history  = get_conversation_history(USER_ID)
+
+        # Find or create a persistent "Telegram" conversation for this user
+        convs = get_conversations(USER_ID)
+        tg_conv = next((c for c in convs if c.get("title") == "Telegram"), None)
+        if tg_conv:
+            conv_id = tg_conv["id"]
+        else:
+            conv_id = create_conversation(USER_ID, title="Telegram")
+
+        history  = get_messages(USER_ID, conv_id, limit=20)
         response = get_ai_response(text, conversation_history=history, user_id=USER_ID)
-        save_conversation_message(USER_ID, "user", text)
-        save_conversation_message(USER_ID, "assistant", response)
+        add_message(USER_ID, conv_id, "user", text)
+        add_message(USER_ID, conv_id, "assistant", response)
         # Telegram message limit is 4096 chars
         for chunk in [response[i:i+4090] for i in range(0, len(response), 4090)]:
             await update.message.reply_text(chunk)
