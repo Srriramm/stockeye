@@ -69,7 +69,9 @@ def emit_alert(alert_data):
     """Send alert to frontend via WebSocket and publish to shared intelligence bus."""
     if socketio_instance:
         try:
-            socketio_instance.emit('new_alert', alert_data, namespace='/')
+            # Ensure all values are JSON-serializable (UUIDs from Postgres come as uuid.UUID objects)
+            safe_data = {k: str(v) if hasattr(v, 'hex') else v for k, v in alert_data.items()}
+            socketio_instance.emit('new_alert', safe_data, namespace='/')
         except Exception as e:
             logger.error(f"WebSocket emit error: {e}")
     try:

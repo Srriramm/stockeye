@@ -19,6 +19,7 @@ prophet
 sqlitecloud
 psycopg2-binary
 supabase
+httpx[http2]>=0.27,<0.29
 redis==5.0.1
 celery[redis]==5.3.6
-python-telegram-bot==20.7
+python-telegram-bot>=21.0,<22.0

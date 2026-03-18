@@ -23,9 +23,24 @@ def _rate_limit_key():
 
 REDIS_URL = os.getenv('REDIS_URL')
 
+
+def _resolve_storage_uri():
+    """Use Redis if reachable, otherwise fall back to in-process memory."""
+    if not REDIS_URL:
+        return "memory://"
+    try:
+        import redis as _redis
+        c = _redis.from_url(REDIS_URL, socket_connect_timeout=1, socket_timeout=1)
+        c.ping()
+        return REDIS_URL
+    except Exception:
+        logger.warning("Redis unreachable — rate limiter falling back to in-memory storage")
+        return "memory://"
+
+
 limiter = Limiter(
     key_func=_rate_limit_key,
-    storage_uri=REDIS_URL or "memory://",   # fall back to in-memory if no Redis
+    storage_uri=_resolve_storage_uri(),
     default_limits=["200 per minute"],
     headers_enabled=True,                   # expose X-RateLimit-* headers
 )
@@ -34,8 +49,6 @@ limiter = Limiter(
 def init_limiter(app):
     """Attach the limiter to the Flask app."""
     limiter.init_app(app)
-    if not REDIS_URL:
-        logger.warning("REDIS_URL not set — rate limiter using in-memory storage (not suitable for multi-process)")
 
 
 # ─── Per-Endpoint Limit Strings ───────────────────────────────
