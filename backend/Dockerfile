@@ -17,6 +17,7 @@ COPY . .
 # Environment variables
 ENV FLASK_APP=app.py
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
 # Expose port
 EXPOSE 5000
