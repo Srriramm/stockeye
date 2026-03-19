@@ -1083,16 +1083,18 @@ def stop_stock_monitor(user_id):
 def monitored_stocks_list(user_id):
     """Get all monitored stocks with current status."""
     stocks = get_monitored_stocks(user_id, active_only=True)
-    enriched = []
+    tickers = [s['ticker'] for s in stocks]
+    prices = get_bulk_prices(tickers) if tickers else {}
 
+    enriched = []
     for stock in stocks:
         ticker = stock['ticker']
-        price_data = get_stock_price(ticker)
+        cur_price = prices.get(ticker)
         enriched.append({
             **stock,
-            'current_price': price_data['current_price'] if price_data else None,
-            'change_percent': price_data.get('change_percent', 0) if price_data else 0,
-            'price_live': price_data is not None,
+            'current_price': cur_price,
+            'change_percent': 0,  # bulk prices returns price only
+            'price_live': cur_price is not None,
         })
 
     return jsonify({'stocks': enriched})
@@ -1551,12 +1553,9 @@ def get_trading_orders(user_id):
 @require_auth
 def get_trading_order(user_id, order_id):
     """Get specific order details, verifying ownership."""
-    order = get_order_by_id(order_id)
+    order = get_order_by_id(user_id, order_id)
 
     if not order:
-        return jsonify({'error': 'Order not found'}), 404
-
-    if order.get('user_id') != user_id:
         return jsonify({'error': 'Order not found'}), 404
 
     return jsonify(order)
@@ -1566,11 +1565,11 @@ def get_trading_order(user_id, order_id):
 @require_auth
 def cancel_trading_order(user_id, order_id):
     """Cancel a pending order, verifying ownership."""
-    order = get_order_by_id(order_id)
-    if not order or order.get('user_id') != user_id:
+    order = get_order_by_id(user_id, order_id)
+    if not order:
         return jsonify({'error': 'Order not found or already executed'}), 404
 
-    success = cancel_order(order_id)
+    success = cancel_order(user_id, order_id)
 
     if success:
         log_event(user_id, 'trade.cancel', 'order', order_id)

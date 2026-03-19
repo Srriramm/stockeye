@@ -101,8 +101,9 @@ TRADING_TOOLS = [
     {
         "name": "get_portfolio_state",
         "description": (
-            "Get current paper trading state: available capital, open positions, "
-            "today's realised P&L, and max allowed position size."
+            "Get current paper trading state: available capital, open positions with "
+            "live prices, unrealised P&L per position, days held, and max allowed "
+            "position size. Positions with should_review=true have been held 5+ days."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -202,7 +203,7 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
 
         # ── get_portfolio_state ───────────────────────────────────────────────
         elif name == "get_portfolio_state":
-            from trading_manager import get_trading_balance, get_trading_portfolio
+            from trading_manager import get_trading_balance, get_trading_portfolio, get_position_ages
             from stock_data import get_bulk_prices
             balance  = get_trading_balance(user_id) or {}
             holdings = get_trading_portfolio(user_id) or []
@@ -210,6 +211,10 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
                 prices = get_bulk_prices([h["ticker"] for h in holdings]) if holdings else {}
             except Exception:
                 prices = {}
+            try:
+                ages = get_position_ages(user_id) if holdings else {}
+            except Exception:
+                ages = {}
 
             enriched = []
             for h in holdings:
@@ -218,7 +223,8 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
                 qty       = float(h.get("quantity") or 0)
                 cur_price = float(prices.get(ticker) or avg_buy)
                 unreal    = round((cur_price - avg_buy) * qty, 2)
-                pnl_pct   = round((cur_price / avg_buy - 1) * 100, 2) if avg_buy else 0
+                pnl_pct   = round((cur_price / avg_buy - 1) * 100, 2) if avg_buy > 0 else 0
+                days_held = ages.get(ticker, 0)
                 enriched.append({
                     "ticker":           ticker,
                     "quantity":         qty,
@@ -227,6 +233,8 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
                     "total_investment": h.get("total_investment"),
                     "unrealised_pnl":   unreal,
                     "pnl_pct":          pnl_pct,
+                    "days_held":        days_held,
+                    "should_review":    days_held >= 5,
                 })
 
             market_value = sum(p["current_price"] * p["quantity"] for p in enriched)
@@ -373,6 +381,20 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             if not order_id:
                 return {"error": "Order placement failed — check trading_manager logs"}
 
+            # Post-trade verification: read back order to confirm DB state
+            from trading_manager import get_order_by_id
+            verified_order = get_order_by_id(user_id, order_id)
+            verified = bool(
+                verified_order
+                and verified_order.get("status") == "EXECUTED"
+                and float(verified_order.get("executed_quantity") or 0) == quantity
+            )
+            if not verified:
+                logger.warning(
+                    f"[AutoTrader:{session_id}] Post-trade verification FAILED for "
+                    f"order {order_id} — DB state may be inconsistent"
+                )
+
             # Publish to shared intelligence bus
             try:
                 from shared_context import signal_from_trade
@@ -382,11 +404,13 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
                 pass
 
             logger.info(
-                f"[AutoTrader:{session_id}] {side} {quantity}x{ticker} @ ₹{price:.2f} | "
+                f"[AutoTrader:{session_id}] {side} {quantity}x{ticker} @ ₹{price:.2f} "
+                f"{'✓' if verified else '⚠ UNVERIFIED'} | "
                 f"{inputs.get('reasoning','')[:120]}"
             )
             return {
                 "success":         True,
+                "verified":        verified,
                 "order_id":        order_id,
                 "status":          "EXECUTED" if order_type == "MARKET" else "PENDING",
                 "ticker":          ticker,
@@ -581,17 +605,31 @@ def run_trading_session(user_id: str, tickers: list | None = None,
                 ),
             })
 
-        try:
-            response = client.messages.create(
-                model      = model,
-                max_tokens = 4096,
-                temperature= 0.1,
-                system     = SYSTEM_PROMPT,
-                tools      = TRADING_TOOLS,
-                messages   = messages,
-            )
-        except Exception as exc:
-            logger.error(f"[{session_id}] Claude API error (iter {iteration}): {exc}")
+        # Retry Anthropic API with backoff (handles transient 429/500/529 errors)
+        response = None
+        for api_attempt in range(3):
+            try:
+                response = client.messages.create(
+                    model      = model,
+                    max_tokens = 4096,
+                    temperature= 0.1,
+                    system     = SYSTEM_PROMPT,
+                    tools      = TRADING_TOOLS,
+                    messages   = messages,
+                )
+                break
+            except Exception as exc:
+                if api_attempt < 2:
+                    import time as _time
+                    wait = 2 ** api_attempt  # 1s, 2s
+                    logger.warning(
+                        f"[{session_id}] Claude API error (iter {iteration}, "
+                        f"attempt {api_attempt + 1}/3): {exc} — retrying in {wait}s"
+                    )
+                    _time.sleep(wait)
+                else:
+                    logger.error(f"[{session_id}] Claude API failed after 3 attempts (iter {iteration}): {exc}")
+        if response is None:
             break
 
         logger.debug(

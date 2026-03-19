@@ -136,11 +136,23 @@ def get_stock_price(ticker):
 
     try:
         yf_ticker = format_ticker(ticker)
-        stock = yf.Ticker(yf_ticker)
 
-        # Get fast info - use history instead of info for reliability
-        hist = stock.history(period='5d')  # 5d gives more buffer than 2d
-        if hist.empty or len(hist) < 1:
+        # Retry up to 2 times with backoff on transient yfinance failures
+        hist = None
+        for attempt in range(3):
+            try:
+                stock = yf.Ticker(yf_ticker)
+                hist = stock.history(period='5d')
+                if hist is not None and not hist.empty and len(hist) >= 1:
+                    break
+            except Exception as retry_exc:
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+                    logger.debug(f"Retrying {ticker} (attempt {attempt + 2}/3): {retry_exc}")
+                else:
+                    raise
+
+        if hist is None or hist.empty or len(hist) < 1:
             logger.warning(f"No price data available for {ticker}")
             return None
 

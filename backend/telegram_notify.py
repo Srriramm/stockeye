@@ -72,3 +72,16 @@ def send_price_alert(ticker: str, alert_type: str, price: float, note: str = "")
         f"{alert_type}: ₹{price:.2f}\n"
         f"{note}"
     )
+
+
+def send_stop_loss_alert(ticker: str, current_price: float, stop_price: float,
+                         qty_sold: int, pnl: float) -> None:
+    """Urgent alert when a stop-loss is auto-triggered."""
+    emoji = "🔴" if pnl < 0 else "🟢"
+    send(
+        f"🚨 <b>STOP-LOSS TRIGGERED — {ticker}</b>\n\n"
+        f"Stop: ₹{stop_price:.2f}  →  Price: ₹{current_price:.2f}\n"
+        f"Sold: {qty_sold} shares\n"
+        f"{emoji} P&L: ₹{pnl:+,.2f}\n\n"
+        f"<i>Auto-executed by stop-loss monitor</i>"
+    )

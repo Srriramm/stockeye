@@ -306,6 +306,43 @@ def get_performance_history(user_id: str, days: int = 30) -> list:
         return []
 
 
+def get_open_stop_orders() -> list:
+    """Return all executed BUY orders that have a stop_price set, grouped with current holdings.
+    Used by the stop-loss monitor to check if any position has breached its stop."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT o.user_id, o.ticker, o.stop_price, o.executed_price, o.quantity, "
+            "       p.quantity AS held_qty, p.avg_buy_price "
+            "FROM orders o "
+            "JOIN trading_portfolio p ON o.user_id = p.user_id AND o.ticker = p.ticker "
+            "WHERE o.side = 'BUY' AND o.status = 'EXECUTED' AND o.stop_price IS NOT NULL "
+            "  AND o.stop_price > 0 AND p.quantity > 0"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_position_ages(user_id: str) -> dict:
+    """Return {ticker: days_held} for all open positions based on earliest BUY order date."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT p.ticker, MIN(o.executed_at) AS first_buy "
+            "FROM trading_portfolio p "
+            "JOIN orders o ON p.user_id = o.user_id AND p.ticker = o.ticker "
+            "WHERE p.user_id = ? AND o.side = 'BUY' AND o.status = 'EXECUTED' "
+            "GROUP BY p.ticker",
+            (user_id,)
+        ).fetchall()
+    ages = {}
+    now = datetime.now()
+    for r in rows:
+        first_buy = r['first_buy']
+        if first_buy:
+            if isinstance(first_buy, str):
+                first_buy = datetime.fromisoformat(first_buy.replace('Z', '+00:00').replace('+00:00', ''))
+            ages[r['ticker']] = (now - first_buy).days
+    return ages
+
+
 # Backward-compat shim: expose execute_order for any external callers
 def execute_order(order_id, execution_price, cursor=None):
     logger.warning("execute_order() is deprecated — use place_order() which auto-executes MARKET orders.")

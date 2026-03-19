@@ -72,6 +72,10 @@ celery_app.conf.update(
             'task': 'tasks.snapshot_all_trading_portfolios',
             'schedule': crontab(hour=16, minute=30),  # 4:30 PM IST — after market close
         },
+        'monitor-stop-losses': {
+            'task': 'tasks.monitor_stop_losses',
+            'schedule': 300.0,      # every 5 minutes during market hours
+        },
         'auto-session-morning': {
             'task': 'tasks.run_auto_session_all_users',
             'schedule': crontab(hour=9, minute=15),   # market open IST
@@ -169,6 +173,84 @@ def run_auto_session_all_users(self):
     except Exception as exc:
         logger.error(f"run_auto_session_all_users failed: {exc}", exc_info=True)
         raise self.retry(exc=exc, countdown=120)
+
+
+@celery_app.task(name='tasks.monitor_stop_losses', bind=True, max_retries=2)
+def monitor_stop_losses(self):
+    """Check all open positions with stop-loss prices against live market data.
+    Auto-sells when price breaches stop. Runs every 5 minutes during market hours."""
+    try:
+        from datetime import datetime
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(ist)
+        # Only run during market hours (9:15 AM - 3:30 PM IST, weekdays)
+        if now.weekday() >= 5:  # Saturday/Sunday
+            return
+        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        if now < market_open or now > market_close:
+            return
+
+        from trading_manager import get_open_stop_orders, place_order
+        from stock_data import get_bulk_prices
+        from telegram_notify import send_stop_loss_alert
+
+        orders = get_open_stop_orders()
+        if not orders:
+            return
+
+        # Deduplicate: one stop per (user_id, ticker) — use the highest stop_price
+        stops = {}
+        for o in orders:
+            key = (o['user_id'], o['ticker'])
+            if key not in stops or float(o['stop_price']) > float(stops[key]['stop_price']):
+                stops[key] = o
+
+        tickers = list({o['ticker'] for o in stops.values()})
+        prices = get_bulk_prices(tickers) if tickers else {}
+
+        triggered = 0
+        for (user_id, ticker), order in stops.items():
+            current_price = prices.get(ticker)
+            if not current_price:
+                continue
+
+            stop_price = float(order['stop_price'])
+            if current_price > stop_price:
+                continue  # price above stop — safe
+
+            # Stop-loss breached — auto-sell entire position
+            held_qty = int(float(order.get('held_qty') or 0))
+            if held_qty <= 0:
+                continue
+
+            avg_buy = float(order.get('avg_buy_price') or 0)
+            try:
+                place_order(
+                    user_id=user_id,
+                    ticker=ticker,
+                    name=ticker,
+                    side='SELL',
+                    order_type='MARKET',
+                    quantity=held_qty,
+                    price=current_price,
+                )
+                pnl = (current_price - avg_buy) * held_qty
+                send_stop_loss_alert(ticker, current_price, stop_price, held_qty, pnl)
+                triggered += 1
+                logger.info(
+                    f"[StopLoss] {ticker} breached ₹{stop_price:.2f} "
+                    f"(now ₹{current_price:.2f}) — sold {held_qty} for user {str(user_id)[:8]}"
+                )
+            except Exception as e:
+                logger.error(f"[StopLoss] Failed to sell {ticker} for {str(user_id)[:8]}: {e}")
+
+        if triggered:
+            logger.info(f"[StopLoss] {triggered} stop-loss(es) triggered this cycle")
+    except Exception as exc:
+        logger.error(f"monitor_stop_losses failed: {exc}", exc_info=True)
+        raise self.retry(exc=exc, countdown=60)
 
 
 @celery_app.task(name='tasks.snapshot_all_trading_portfolios', bind=True, max_retries=2)
