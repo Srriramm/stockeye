@@ -272,17 +272,16 @@ def snapshot_portfolio(user_id: str) -> None:
     holdings    = get_trading_portfolio(user_id)
     balance_row = get_trading_balance(user_id)
     prices      = get_bulk_prices([h['ticker'] for h in holdings]) if holdings else {}
-    market_val  = sum(h['quantity'] * (prices.get(h['ticker']) or h['avg_buy_price']) for h in holdings)
-    cost_basis  = sum(h['quantity'] * h['avg_buy_price'] for h in holdings)
-    total       = balance_row['balance'] + market_val
+    market_val = sum(h['quantity'] * (prices.get(h['ticker']) or h['avg_buy_price']) for h in holdings)
+    total      = balance_row['balance'] + market_val
     today       = datetime.utcnow().strftime('%Y-%m-%d')
     with get_db_connection() as conn:
         prev = conn.execute(
-            "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT 1",
-            (user_id,)
+            "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? AND date < ? ORDER BY date DESC LIMIT 1",
+            (user_id, today)
         ).fetchone()
         # First day: compare against cash + cost basis (what we started with before market moves)
-        prev_val = prev['portfolio_value'] if prev else (balance_row['balance'] + cost_basis)
+        prev_val = prev['portfolio_value'] if prev else (balance_row['balance'] + market_val)
         pnl      = round(total - prev_val, 2)
         pnl_pct  = round(pnl / prev_val * 100, 2) if prev_val else 0
         conn.execute(
@@ -290,7 +289,7 @@ def snapshot_portfolio(user_id: str) -> None:
             "(user_id, date, portfolio_value, cash_balance, invested, pnl, pnl_pct) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (user_id, today, round(total, 2), round(balance_row['balance'], 2),
-             round(cost_basis, 2), pnl, pnl_pct)
+             round(market_val, 2), pnl, pnl_pct)
         )
 
 
