@@ -41,12 +41,11 @@ logger = logging.getLogger(__name__)
 from portfolio_manager import (
     init_database, add_holding, get_all_holdings, get_holding_by_id,
     update_holding, delete_holding, calculate_portfolio_value, get_portfolio_stats,
-    start_monitoring, stop_monitoring, get_monitored_stocks, sync_portfolio_to_monitors,
-    create_alert, get_recent_alerts, get_alerts_for_ticker, mark_alert_read,
-    add_price_alert, get_active_price_alerts,
-    get_portfolio_history, save_chat_message, get_chat_history, clear_chat_history
+    start_monitoring, stop_monitoring, get_monitored_stocks,
+    get_recent_alerts, get_alerts_for_ticker, mark_alert_read,
+    get_portfolio_history,
 )
-from auth_manager import require_auth, optional_auth, verify_token, require_admin, decode_jwt_payload
+from auth_manager import require_auth, verify_token, require_admin, decode_jwt_payload
 from user_manager import (
     ensure_user_registered, get_user_record, get_cached_user_status,
     list_users, update_user_status, update_user_role, update_user_notes,
@@ -64,9 +63,9 @@ from stock_data import (
     calculate_fibonacci_levels, find_support_resistance,
     POPULAR_INDIAN_STOCKS
 )
-from news_monitor import fetch_stock_news, fetch_market_news, get_news_summary, get_reddit_sentiment, clear_news_cache
+from news_monitor import fetch_stock_news, fetch_market_news, get_news_summary, clear_news_cache
 from intelligence_engine import get_stock_profile, invalidate_profile
-from ai_advisor import get_stock_advice, get_stock_advice_dual, analyze_stock, get_portfolio_review, compare_stocks
+from ai_advisor import get_stock_advice_dual, analyze_stock, get_portfolio_review, compare_stocks
 from market_monitor import monitor_service, set_socketio as set_monitor_socketio
 from realtime_service import realtime_service, set_socketio as set_realtime_socketio
 from watchlist_manager import (
@@ -77,9 +76,9 @@ from watchlist_manager import (
     get_stock_in_watchlists, search_watchlist_stocks
 )
 from trading_manager import (
-    place_order, execute_order, cancel_order, get_order_by_id,
+    place_order, cancel_order, get_order_by_id,
     get_orders, get_trades, get_trading_portfolio, get_trading_balance,
-    reset_trading_account, add_funds, snapshot_portfolio, get_performance_history,
+    reset_trading_account, add_funds, get_performance_history,
     OrderType, OrderSide
 )
 from stock_screener import screen_stocks, get_predefined_screens, get_sectors
@@ -88,7 +87,7 @@ from advanced_alerts import (
     create_rsi_alert, create_moving_average_cross_alert, create_week_52_alert,
     get_active_alerts, delete_alert as delete_advanced_alert, reset_alert
 )
-from forecasting_engine import forecast_stock_price, get_risk_profile
+from forecasting_engine import get_risk_profile
 from brain_engine import run_brain_analysis
 from proactive_agent import analyze_stock_for_user, set_agent_socketio
 from recommendation_store import (
@@ -97,7 +96,7 @@ from recommendation_store import (
     init_agent_recommendations_table,
 )
 from middleware import init_middleware
-from rate_limiter import init_limiter, limiter, LIMIT_CHAT, LIMIT_FORECAST, LIMIT_TRADING, LIMIT_PORTFOLIO
+from rate_limiter import init_limiter, limiter, LIMIT_CHAT, LIMIT_FORECAST
 from audit import log_event
 
 # ─── App Configuration ─────────────────────────────────────────
@@ -2540,7 +2539,7 @@ def get_advisor_brief(user_id):
                     "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? AND date < ? ORDER BY date DESC LIMIT 1",
                     (user_id, today)
                 ).fetchone()
-                prev_val = prev['portfolio_value'] if prev else (balance_info.get('balance', 0) + market_val)
+                prev_val = prev['portfolio_value'] if prev else (balance_info.get('balance', 0) + total_invested)
                 pnl      = round(total_val - prev_val, 2)
                 pnl_pct  = round(pnl / prev_val * 100, 2) if prev_val else 0
                 conn.execute(
