@@ -55,7 +55,7 @@ export default function LoginPage() {
             <div style={styles.card}>
                 {/* Logo & Brand */}
                 <div style={styles.logoSection}>
-                    <StockEyeLogo size={120} dark={true} />
+                    <StockEyeLogo size={85} dark={true} />
                     <p style={{ ...styles.brandTagline, marginTop: 10 }}>AI-Powered Stock Intelligence</p>
                 </div>
 

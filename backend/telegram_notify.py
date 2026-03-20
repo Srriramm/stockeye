@@ -21,20 +21,27 @@ def _cfg():
 
 
 def send(message: str, chat_id: str | None = None, parse_mode: str = "HTML") -> bool:
-    """Send a Telegram message. Silent no-op if token/chat_id not configured."""
+    """Send a Telegram message. Silent no-op if token/chat_id not configured.
+    Auto-splits messages exceeding Telegram's 4096-char limit."""
     token, default_cid = _cfg()
     cid = chat_id or default_cid
     if not token or not cid:
         return False
+
+    # Telegram max is 4096 chars; split if needed
+    chunks = [message[i:i+4096] for i in range(0, len(message), 4096)]
+
     try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": cid, "text": message, "parse_mode": parse_mode},
-            timeout=5,
-        )
-        ok = resp.status_code == 200
-        if not ok:
-            logger.debug(f"Telegram send failed {resp.status_code}: {resp.text[:200]}")
+        ok = True
+        for chunk in chunks:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": cid, "text": chunk, "parse_mode": parse_mode},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                logger.debug(f"Telegram send failed {resp.status_code}: {resp.text[:200]}")
+                ok = False
         return ok
     except Exception as exc:
         logger.debug(f"Telegram notify failed (non-fatal): {exc}")
@@ -50,7 +57,7 @@ def send_trade_summary(session_result: dict) -> None:
     if not trades:
         msg = (
             f"🤖 <b>Auto-session complete</b> — no trades placed\n"
-            f"💬 {reason[:300]}"
+            f"💬 {reason[:3000]}"
         )
     else:
         lines = [f"🤖 <b>Auto-session</b> — {len(trades)} trade(s), ₹{capital:,.0f} deployed\n"]
@@ -60,7 +67,7 @@ def send_trade_summary(session_result: dict) -> None:
                 f"{side_emoji}  <b>{t.get('ticker')}</b>  "
                 f"{t.get('quantity')}×  ₹{t.get('execution_price', 0):.2f}"
             )
-        lines.append(f"\n💬 {reason[:250]}")
+        lines.append(f"\n💬 {reason[:3000]}")
         msg = "\n".join(lines)
 
     send(msg)
