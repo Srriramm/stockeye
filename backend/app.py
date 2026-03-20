@@ -8,7 +8,7 @@ import sys
 import json
 import logging
 from datetime import datetime
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, redirect
 
 import io
 from flask_cors import CORS
@@ -2528,6 +2528,31 @@ def get_advisor_brief(user_id):
 
         unrealised_pnl = round(portfolio_value - balance_info.get('balance', 0) - total_invested, 2)
 
+        # Snapshot daily returns — reuses the live prices already fetched above
+        try:
+            from trading_manager import _ensure_snapshots_table
+            today = __import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')
+            market_val = sum(h.get('current_value', 0) for h in holdings)
+            total_val  = balance_info.get('balance', 0) + market_val
+            with get_db_connection() as conn:
+                _ensure_snapshots_table(conn)
+                prev = conn.execute(
+                    "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT 1",
+                    (user_id,)
+                ).fetchone()
+                prev_val = prev['portfolio_value'] if prev else (balance_info.get('balance', 0) + total_invested)
+                pnl      = round(total_val - prev_val, 2)
+                pnl_pct  = round(pnl / prev_val * 100, 2) if prev_val else 0
+                conn.execute(
+                    "INSERT OR REPLACE INTO trading_daily_snapshots "
+                    "(user_id, date, portfolio_value, cash_balance, invested, pnl, pnl_pct) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, today, round(total_val, 2), round(balance_info.get('balance', 0), 2),
+                     round(total_invested, 2), pnl, pnl_pct)
+                )
+        except Exception as snap_exc:
+            logger.debug(f"Brief snapshot update failed (non-fatal): {snap_exc}")
+
         # 4. Market indices
         try:
             indices = get_market_indices()
@@ -2547,6 +2572,7 @@ def get_advisor_brief(user_id):
                 'holdings_count': len(holdings),
             },
             'indices': indices,
+            'performance_history': get_performance_history(user_id, 14),
         })
 
     except Exception as exc:

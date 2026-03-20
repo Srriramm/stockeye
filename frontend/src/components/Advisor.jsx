@@ -243,6 +243,7 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
         try {
             const res = await authAxios.get(`${API_URL}/api/advisor/brief`);
             setBrief(res.data);
+            setPerfHistory(res.data.performance_history || []);
         } catch (e) {
             setError(e.response?.data?.error || e.message);
         } finally {
@@ -263,9 +264,6 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
     useEffect(() => {
         fetchBrief();
         scanOpps();
-        authAxios.get(`${API_URL}/api/auto-trading/performance?days=14`)
-            .then(r => setPerfHistory(r.data.history || []))
-            .catch(() => {});
     }, [fetchBrief, scanOpps]);
 
     // Merge live WebSocket insights
@@ -292,9 +290,6 @@ export default function Advisor({ indices: globalIndices, liveInsights, onInsigh
             setSession(res.data);
             fetchBrief();
             scanOpps();
-            authAxios.get(`${API_URL}/api/auto-trading/performance?days=14`)
-                .then(r => setPerfHistory(r.data.history || []))
-                .catch(() => {});
         } catch (e) {
             setError('Agent session failed: ' + (e.response?.data?.error || e.message));
         } finally {
