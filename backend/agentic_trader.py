@@ -23,13 +23,13 @@ logger = logging.getLogger(__name__)
 
 # ── Model config ──────────────────────────────────────────────────────────────
 MODEL_FAST      = "claude-haiku-4-5-20251001"
-MODEL_DEEP      = "claude-sonnet-4-6"
+MODEL_DEEP      = "claude-opus-4-6"          # Upgraded: Opus for deep decisions
 MAX_ITERATIONS  = 12
 
-# ── Hard risk limits ──────────────────────────────────────────────────────────
-MAX_POSITION_PCT   = 0.05   # 5 % of total portfolio per trade
-MAX_OPEN_POSITIONS = 3
-MAX_DAILY_LOSS_PCT = 0.02   # 2 % daily loss triggers halt
+# ── Hard risk limits (enforced by RiskGate — do not change logic here) ────────
+MAX_POSITION_PCT   = 0.20   # 20% of portfolio per position (ATR-sized down further)
+MAX_OPEN_POSITIONS = 5
+MAX_DAILY_LOSS_PCT = 0.05   # 5% daily loss triggers halt
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are Arjun, a senior proprietary trader with 12 years of experience on NSE/BSE.
@@ -72,10 +72,21 @@ HOW TO ENTER (think like a professional):
 - In a strong market, ride momentum — don't fight the tape.
 - Always cite your numbers: price, spread %, z-score, RSI, expected ₹ P&L.
 
-HARD LIMITS (enforced by the system — non-negotiable):
-- Max 3 open positions at any time
-- Max 5% of portfolio per single position
-- Stop all new buys if portfolio daily loss exceeds 2%
+SIGNAL ENGINE (new — use analyse_opportunity to see these):
+- Composite signal score 0-100 combining: FII/DII flows (25%), F&O PCR (20%), Technicals (20%), Delivery % (15%), News (20%)
+- Score > 65 = bullish setup, Score < 35 = avoid, Score 45-65 = neutral/watch
+- FII/DII flow is the single most important signal for Indian equities
+- Data quality "low" = fewer than 3 signals available = reduce conviction
+
+RISK GATE (enforced automatically on every BUY — no exceptions):
+- Max 1.5% portfolio at risk per trade (ATR-based stop sizing)
+- Max 20% portfolio in any single stock
+- Max 60% total portfolio deployed simultaneously
+- Max 5 open positions
+- No new longs if daily loss > 5% or drawdown > 15%
+- No entry if India VIX > 25 or FII selling > ₹2000cr
+- 3 consecutive losses → HOLD-only mode
+- Minimum confidence 0.70 required — set it honestly
 
 Be honest in your session summary. If you didn't trade, explain exactly why. If you made a mistake, say so.
 A good trader learns from every session — profitable or not."""
@@ -140,7 +151,7 @@ TRADING_TOOLS = [
     },
     {
         "name": "execute_trade",
-        "description": "Execute a paper trade. Returns order confirmation with order ID.",
+        "description": "Execute a paper trade. All BUY orders pass through RiskGate — hard rules enforced automatically. Returns order confirmation or rejection reason.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -148,11 +159,12 @@ TRADING_TOOLS = [
                 "side":       {"type": "string", "enum": ["BUY", "SELL"]},
                 "quantity":   {"type": "integer", "minimum": 1},
                 "order_type": {"type": "string", "enum": ["MARKET"]},
-                "price":      {"type": "number", "description": "Limit price (required for LIMIT orders)"},
-                "stop_loss":  {"type": "number", "description": "Stop-loss price (INR)"},
-                "reasoning":  {"type": "string", "description": "1-2 sentences: why this trade, what signal triggered it"},
+                "price":      {"type": "number", "description": "Entry price (INR)"},
+                "stop_loss":  {"type": "number", "description": "Stop-loss price — must be at a meaningful technical level, not arbitrary"},
+                "confidence": {"type": "number", "description": "Your confidence 0.0-1.0. Below 0.70 will be blocked by RiskGate."},
+                "reasoning":  {"type": "string", "description": "2-3 sentences: what signals aligned, why now, what is the exit plan"},
             },
-            "required": ["ticker", "side", "quantity", "order_type", "reasoning"],
+            "required": ["ticker", "side", "quantity", "order_type", "reasoning", "confidence"],
         },
     },
     {
@@ -254,76 +266,115 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             ticker = inputs.get("ticker", "").upper().replace(".NS", "").replace(".BO", "")
             from stock_data import calculate_technical_indicators, get_stock_price
             from news_monitor import fetch_stock_news
+            from signal_engine import score_stock, format_scores_for_prompt
+
             price_data = get_stock_price(ticker) or {}
             tech       = calculate_technical_indicators(ticker, period="3mo") or {}
             articles   = fetch_stock_news(ticker, days=3, max_articles=5)
             pos = sum(1 for a in articles if a.get("sentiment") == "positive")
             neg = sum(1 for a in articles if a.get("sentiment") == "negative")
+
+            # India-specific signal scoring
+            signal_result = score_stock(ticker)
+            signal_block  = format_scores_for_prompt(signal_result)
+
+            # Deep analysis: Opus + extended thinking
+            opus_reasoning = ""
+            try:
+                import anthropic as _anthropic
+                _client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+                analysis_prompt = f"""You are a senior NSE/BSE trader doing a deep analysis before committing capital.
+
+{signal_block}
+
+Price: ₹{price_data.get('current_price', 'N/A')}
+Day change: {price_data.get('day_change_pct', 'N/A')}%
+RSI: {tech.get('rsi', 'N/A')} | MACD: {tech.get('macd_direction', 'N/A')}
+SMA-20: {tech.get('sma_20', 'N/A')} | SMA-50: {tech.get('sma_50', 'N/A')}
+Bollinger: {tech.get('bollinger_bands', {})}
+News: {pos} positive, {neg} negative articles (last 3 days)
+
+Answer these 4 questions:
+1. Are the signals genuinely aligned or is this noise?
+2. What could go wrong? What's the asymmetric downside?
+3. What is the ideal entry, stop-loss (below technical support), and target (min 2:1 R:R)?
+4. Final verdict: BUY / WATCH / AVOID — and confidence 0-100.
+
+Be skeptical. A great setup missed is better than a bad trade taken."""
+
+                thinking_resp = _client.messages.create(
+                    model     = MODEL_DEEP,
+                    max_tokens= 12000,
+                    thinking  = {"type": "enabled", "budget_tokens": 8000},
+                    messages  = [{"role": "user", "content": analysis_prompt}],
+                )
+                for blk in thinking_resp.content:
+                    if blk.type == "text":
+                        opus_reasoning = blk.text
+                        break
+            except Exception as _e:
+                logger.warning(f"[AutoTrader] Opus extended thinking failed for {ticker}: {_e}")
+                opus_reasoning = "(Extended analysis unavailable)"
+
             return {
-                "ticker":          ticker,
-                "current_price":   price_data.get("current_price"),
-                "day_change_pct":  price_data.get("day_change_pct"),
-                "volume_ratio":    tech.get("volume_ratio"),
-                "rsi":             tech.get("rsi"),
-                "macd_direction":  tech.get("macd_direction"),
-                "sma_20":          tech.get("sma_20"),
-                "sma_50":          tech.get("sma_50"),
-                "bollinger":       tech.get("bollinger_bands", {}),
-                "news_positive":   pos,
-                "news_negative":   neg,
-                "tech_signal":     tech.get("signal"),
+                "ticker":            ticker,
+                "current_price":     price_data.get("current_price"),
+                "day_change_pct":    price_data.get("day_change_pct"),
+                "volume_ratio":      tech.get("volume_ratio"),
+                "rsi":               tech.get("rsi"),
+                "macd_direction":    tech.get("macd_direction"),
+                "sma_20":            tech.get("sma_20"),
+                "sma_50":            tech.get("sma_50"),
+                "bollinger":         tech.get("bollinger_bands", {}),
+                "news_positive":     pos,
+                "news_negative":     neg,
+                "tech_signal":       tech.get("signal"),
+                "composite_score":   signal_result["composite_score"],
+                "signal_scores":     signal_result["scores"],
+                "market_data":       signal_result["market_data"],
+                "data_quality":      signal_result["data_quality"],
+                "opus_analysis":     opus_reasoning,
             }
 
         # ── calculate_position_size ───────────────────────────────────────────
         elif name == "calculate_position_size":
             from trading_manager import get_trading_balance, get_trading_portfolio
-            entry    = float(inputs.get("entry_price") or 0)
-            stop     = float(inputs.get("stop_loss")   or 0)
-            risk_pct = float(inputs.get("risk_pct")    or 0.01)
-            ticker   = inputs.get("ticker", "")
+            from risk_gate import risk_gate
+
+            entry  = float(inputs.get("entry_price") or 0)
+            stop   = float(inputs.get("stop_loss")   or 0)
+            ticker = inputs.get("ticker", "")
 
             if entry <= 0:
                 return {"error": "entry_price must be > 0"}
-            risk_per_share = abs(entry - stop) if stop else entry * 0.02
-            if risk_per_share == 0:
-                return {"error": "stop_loss must differ from entry_price"}
 
-            balance   = get_trading_balance(user_id) or {}
-            holdings  = get_trading_portfolio(user_id) or []   # list of dicts
-            invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
-            total     = float(balance.get("balance") or 100_000) + invested
-            avail     = float(balance.get("balance") or 100_000)
-            # If a session budget was set, split it evenly across max positions
+            balance_row = get_trading_balance(user_id) or {}
+            holdings    = get_trading_portfolio(user_id) or []
+            invested    = sum(float(h.get("total_investment") or 0) for h in holdings)
+            total_val   = float(balance_row.get("balance") or 100_000) + invested
+            avail       = float(balance_row.get("balance") or 100_000)
+
+            # Budget mode: cap available cash to session budget
             if budget is not None:
-                ref_capital  = min(float(budget), avail)
-                # Budget mode: split evenly across slots — use capital sizing, not risk sizing
-                slot_capital = ref_capital / MAX_OPEN_POSITIONS  # e.g. 9000/3 = ₹3000
-                quantity     = max(1, int(slot_capital / entry))
-            else:
-                ref_capital  = total
-                max_capital  = ref_capital * MAX_POSITION_PCT
-                risk_capital = ref_capital * min(risk_pct, 0.02)
-                qty_risk     = int(risk_capital / risk_per_share)
-                qty_capital  = int(max_capital / entry)
-                quantity     = max(1, min(qty_risk, qty_capital))
+                avail = min(float(budget), avail)
 
-            capital_required = round(quantity * entry, 2)
-            return {
-                "ticker":                ticker,
-                "quantity":              quantity,
-                "entry_price":           entry,
-                "stop_loss":             stop,
-                "capital_required":      capital_required,
-                "capital_at_risk":       round(quantity * risk_per_share, 2),
-                "available_capital":     round(avail, 2),
-                "within_limits":         capital_required <= avail,
-            }
+            return risk_gate.calculate_position_size(
+                ticker          = ticker,
+                entry_price     = entry,
+                stop_loss       = stop,
+                portfolio_value = total_val,
+                available_cash  = avail,
+                user_id         = user_id,
+            )
 
         # ── execute_trade ─────────────────────────────────────────────────────
         elif name == "execute_trade":
             from trading_manager import (
                 get_trading_portfolio, get_trading_balance, place_order
             )
+            from risk_gate import risk_gate
+            from signal_engine import score_stock
+
             holdings     = get_trading_portfolio(user_id) or []
             held_tickers = {h["ticker"] for h in holdings}
             ticker_check = inputs.get("ticker", "").upper()
@@ -333,14 +384,39 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             if side_check == "BUY" and ticker_check in held_tickers:
                 return {"error": f"Already holding {ticker_check} — sell first or pick a different stock"}
 
-            # Hard limit: max open positions
-            if side_check == "BUY" and len(holdings) >= MAX_OPEN_POSITIONS:
-                return {"error": f"Max {MAX_OPEN_POSITIONS} open positions reached — skipping trade"}
+            balance  = get_trading_balance(user_id) or {}
+            invested = sum(float(h.get("total_investment") or 0) for h in holdings)
+            total    = float(balance.get("balance") or 100_000) + invested
 
-            # Hard limit: daily loss (approximate using invested vs balance)
-            balance   = get_trading_balance(user_id) or {}
-            invested  = sum(float(h.get("total_investment") or 0) for h in holdings)
-            total     = float(balance.get("balance") or 100_000) + invested
+            # RiskGate check (BUY only)
+            if side_check == "BUY":
+                entry_price = float(inputs.get("price") or 0)
+                quantity    = int(inputs.get("quantity") or 1)
+                portfolio_ctx = risk_gate.build_portfolio_context(user_id)
+
+                # Fetch market data for risk checks
+                signal_result = score_stock(ticker_check)
+                market_data   = {
+                    **signal_result.get("market_data", {}),
+                    "avg_daily_volume_cr": None,   # TODO: add liquidity data
+                    "days_to_earnings":    None,   # TODO: add earnings calendar
+                }
+
+                gate_passed, gate_failures = risk_gate.check_all(
+                    ticker      = ticker_check,
+                    side        = side_check,
+                    quantity    = quantity,
+                    entry_price = entry_price,
+                    portfolio   = portfolio_ctx,
+                    market_data = market_data,
+                    confidence  = float(inputs.get("confidence", 0.75)),
+                    user_id     = user_id,
+                )
+                if not gate_passed:
+                    return {
+                        "error":         "RiskGate blocked this trade",
+                        "rule_failures": gate_failures,
+                    }
 
             ticker     = inputs.get("ticker", "").upper()
             side       = inputs.get("side", "BUY")
@@ -408,16 +484,29 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
                 f"{'✓' if verified else '⚠ UNVERIFIED'} | "
                 f"{inputs.get('reasoning','')[:120]}"
             )
+
+            # Capture signal scores at time of execution for track record
+            try:
+                trade_signal_scores = score_stock(ticker).get("scores", {})
+                composite_at_entry  = score_stock(ticker).get("composite_score")
+            except Exception:
+                trade_signal_scores = {}
+                composite_at_entry  = None
+
             return {
-                "success":         True,
-                "verified":        verified,
-                "order_id":        order_id,
-                "status":          "EXECUTED" if order_type == "MARKET" else "PENDING",
-                "ticker":          ticker,
-                "side":            side,
-                "quantity":        quantity,
-                "execution_price": round(price, 2),
-                "total_value":     round(quantity * price, 2),
+                "success":             True,
+                "verified":            verified,
+                "order_id":            order_id,
+                "status":              "EXECUTED" if order_type == "MARKET" else "PENDING",
+                "ticker":              ticker,
+                "side":                side,
+                "quantity":            quantity,
+                "execution_price":     round(price, 2),
+                "total_value":         round(quantity * price, 2),
+                "signal_scores":       trade_signal_scores,
+                "composite_score":     composite_at_entry,
+                "stop_loss":           stop_loss,
+                "reasoning":           inputs.get("reasoning", ""),
             }
 
         # ── submit_session_summary ────────────────────────────────────────────
@@ -556,6 +645,18 @@ def run_trading_session(user_id: str, tickers: list | None = None,
         f"Your available cash is ₹{available:,.2f}. "
     ) if budget is not None else ""
 
+    # Market regime — shapes the entire session strategy
+    try:
+        from signal_engine import get_market_regime
+        regime_data  = get_market_regime()
+        regime_block = (
+            f"MARKET REGIME: {regime_data['regime']} | "
+            f"{regime_data.get('strategy_note', '')} | "
+            f"Reasons: {'; '.join(regime_data.get('reasons', []))}"
+        )
+    except Exception:
+        regime_block = ""
+
     # Shared intelligence from other modules (proactive agent, monitor alerts)
     try:
         from shared_context import get_context_summary
@@ -582,6 +683,7 @@ def run_trading_session(user_id: str, tickers: list | None = None,
             "role": "user",
             "content": (
                 f"Run a paper trading session. Today: {date.today().isoformat()}. "
+                f"{regime_block} "
                 f"{budget_note}"
                 f"{win_rate_note}"
                 f"{intel_block}"

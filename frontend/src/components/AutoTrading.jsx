@@ -3,8 +3,12 @@ import { authAxios } from '../utils/api';
 import {
     Zap, Play, RefreshCw, TrendingUp, TrendingDown,
     Shield, AlertTriangle, CheckCircle, Clock, BarChart2,
-    Activity, Bot, Link, Layers, Target, DollarSign, Plus, X, Search
+    Activity, Bot, Link, Layers, Target, DollarSign, Plus, X, Search,
+    BookOpen, BarChart3, Briefcase,
 } from 'lucide-react';
+import WeeklyReview from './WeeklyReview';
+import SignalAccuracy from './SignalAccuracy';
+import Portfolios from './Portfolios';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -133,6 +137,143 @@ function TradeRow({ trade }) {
 }
 
 // ── Main component ─────────────────────────────────────────────────────────
+// ── Risk settings field definitions ────────────────────────────────────────
+const RISK_FIELDS = [
+    { key: 'max_risk_per_trade',     label: 'Max risk per trade',      unit: '%',  min: 0.1,  max: 5,     step: 0.1,  tip: 'Portfolio % at risk on each trade (ATR-based sizing)' },
+    { key: 'max_single_stock_pct',   label: 'Max single stock',        unit: '%',  min: 5,    max: 50,    step: 1,    tip: 'Max % of portfolio in any one stock' },
+    { key: 'max_portfolio_heat',     label: 'Max portfolio deployed',  unit: '%',  min: 20,   max: 90,    step: 5,    tip: 'Max % of total portfolio in open positions' },
+    { key: 'max_open_positions',     label: 'Max open positions',      unit: '',   min: 1,    max: 20,    step: 1,    tip: 'Hard cap on simultaneous open trades' },
+    { key: 'daily_loss_limit',       label: 'Daily loss halt',         unit: '%',  min: 1,    max: 20,    step: 0.5,  tip: 'Stop new trades if portfolio drops this much today' },
+    { key: 'drawdown_pause',         label: 'Drawdown pause',          unit: '%',  min: 5,    max: 40,    step: 1,    tip: 'Pause strategy if portfolio falls this % from peak' },
+    { key: 'min_confidence',         label: 'Min AI confidence',       unit: '%',  min: 50,   max: 95,    step: 1,    tip: 'Minimum confidence required before executing a trade' },
+    { key: 'fii_selling_block_cr',   label: 'FII selling block',       unit: '₹cr', min: 500, max: 10000, step: 100,  tip: 'Block new longs if FII sold more than this today' },
+    { key: 'india_vix_limit',        label: 'India VIX limit',         unit: '',   min: 15,   max: 40,    step: 0.5,  tip: 'No new longs if India VIX is above this level' },
+    { key: 'consecutive_loss_limit', label: 'Consecutive loss limit',  unit: '',   min: 1,    max: 10,    step: 1,    tip: 'Switch to HOLD-only after this many losses in a row' },
+    { key: 'earnings_blackout_days', label: 'Earnings blackout',       unit: 'days', min: 0,  max: 5,     step: 1,    tip: 'No entry within this many days before earnings' },
+];
+
+function RiskSettingsPanel({ onClose }) {
+    const [settings, setSettings]   = useState(null);
+    const [defaults, setDefaults]   = useState({});
+    const [draft, setDraft]         = useState({});
+    const [saving, setSaving]       = useState(false);
+    const [saved, setSaved]         = useState(false);
+    const [loadErr, setLoadErr]     = useState('');
+
+    useEffect(() => {
+        authAxios.get(`${API_URL}/api/trading/risk-settings`)
+            .then(r => {
+                setSettings(r.data.settings);
+                setDefaults(r.data.defaults);
+                setDraft(r.data.settings);
+            })
+            .catch(() => setLoadErr('Failed to load settings'));
+    }, []);
+
+    const handleChange = (key, val) => {
+        setDraft(d => ({ ...d, [key]: Number(val) }));
+        setSaved(false);
+    };
+
+    const handleReset = (key) => {
+        setDraft(d => ({ ...d, [key]: defaults[key] }));
+        setSaved(false);
+    };
+
+    const handleSave = async () => {
+        setSaving(true);
+        try {
+            const res = await authAxios.put(`${API_URL}/api/trading/risk-settings`, draft);
+            setSettings(res.data.settings);
+            setDraft(res.data.settings);
+            setSaved(true);
+        } catch {
+            setLoadErr('Save failed — check values and retry');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (loadErr) return (
+        <div className="glass-panel p-6 text-red-500 text-sm">{loadErr}</div>
+    );
+    if (!settings) return (
+        <div className="glass-panel p-6 text-slate-400 text-sm animate-pulse">Loading risk settings…</div>
+    );
+
+    return (
+        <div className="glass-panel p-6 space-y-5">
+            <div className="flex items-center justify-between">
+                <div>
+                    <h2 className="text-base font-semibold text-slate-800 flex items-center gap-2">
+                        <Shield size={16} className="text-indigo-500" /> Risk Rules
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                        All rules are enforced automatically before every trade. AI cannot override them.
+                    </p>
+                </div>
+                {onClose && (
+                    <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+                        <X size={16} />
+                    </button>
+                )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {RISK_FIELDS.map(f => {
+                    const current  = draft[f.key] ?? defaults[f.key];
+                    const isChanged = current !== defaults[f.key];
+                    return (
+                        <div key={f.key} className="space-y-1">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-medium text-slate-600" title={f.tip}>
+                                    {f.label}
+                                    {f.unit && <span className="text-slate-400 ml-1">({f.unit})</span>}
+                                </label>
+                                {isChanged && (
+                                    <button
+                                        onClick={() => handleReset(f.key)}
+                                        className="text-[10px] text-indigo-500 hover:underline"
+                                    >
+                                        Reset to {defaults[f.key]}
+                                    </button>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <input
+                                    type="range"
+                                    min={f.min} max={f.max} step={f.step}
+                                    value={current}
+                                    onChange={e => handleChange(f.key, e.target.value)}
+                                    className="flex-1 accent-indigo-500"
+                                />
+                                <span className={`text-xs font-mono w-12 text-right ${isChanged ? 'text-indigo-600 font-semibold' : 'text-slate-500'}`}>
+                                    {current}{f.unit === '%' ? '%' : ''}
+                                </span>
+                            </div>
+                            <p className="text-[10px] text-slate-400">{f.tip}</p>
+                        </div>
+                    );
+                })}
+            </div>
+
+            <div className="flex items-center gap-3 pt-2 border-t border-slate-100">
+                <button
+                    onClick={handleSave}
+                    disabled={saving}
+                    className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                >
+                    {saving ? 'Saving…' : 'Save Rules'}
+                </button>
+                {saved && <span className="text-xs text-emerald-600 font-medium">✓ Saved</span>}
+                <span className="text-xs text-slate-400 ml-auto">
+                    Changes apply to the next autonomous session
+                </span>
+            </div>
+        </div>
+    );
+}
+
 export default function AutoTrading() {
     const [opportunities, setOpportunities]   = useState([]);
     const [oppLoading, setOppLoading]         = useState(false);
@@ -146,6 +287,7 @@ export default function AutoTrading() {
     const [showSuggestions, setShowSuggestions] = useState(false);
     const [suggLoading, setSuggLoading]         = useState(false);
     const [activeSugg, setActiveSugg]           = useState(-1);
+    const [showRiskSettings, setShowRiskSettings] = useState(false);
     const searchTimeout                         = useRef(null);
     const pickerRef                             = useRef(null);
 
@@ -626,29 +768,76 @@ export default function AutoTrading() {
                         )}
                     </div>
 
-                    {/* Risk limits info */}
-                    <div className="glass-panel p-5">
-                        <div className="flex items-center gap-2 mb-3">
-                            <Shield size={14} className="text-emerald-500" />
-                            <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Hard Risk Limits</span>
-                        </div>
-                        <div className="space-y-2 text-xs text-slate-500">
-                            {[
-                                ['Max position size', '5% of portfolio'],
-                                ['Max open positions', '3 concurrent'],
-                                ['Daily loss limit',  '2% auto-halt'],
-                                ['Min risk/reward',   '≥ 1.5×'],
-                                ['Min expected profit','> 0.5% (after costs)'],
-                            ].map(([k, v]) => (
-                                <div key={k} className="flex justify-between">
-                                    <span>{k}</span>
-                                    <span className="font-bold text-slate-700">{v}</span>
+                    {/* Risk settings — toggle between summary and full editor */}
+                    {showRiskSettings ? (
+                        <RiskSettingsPanel onClose={() => setShowRiskSettings(false)} />
+                    ) : (
+                        <div className="glass-panel p-5">
+                            <div className="flex items-center justify-between mb-3">
+                                <div className="flex items-center gap-2">
+                                    <Shield size={14} className="text-emerald-500" />
+                                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Risk Rules</span>
                                 </div>
-                            ))}
+                                <button
+                                    onClick={() => setShowRiskSettings(true)}
+                                    className="text-xs text-indigo-500 hover:underline font-medium"
+                                >
+                                    Customise →
+                                </button>
+                            </div>
+                            <p className="text-xs text-slate-400">
+                                All trades pass through your risk rules before executing.
+                                Tap <span className="font-medium text-indigo-500">Customise</span> to adjust limits.
+                            </p>
                         </div>
-                    </div>
+                    )}
                 </div>
             </div>
+
+            {/* ── Insights tabs: Weekly Review · Signal Accuracy · Portfolios ── */}
+            <InsightsTabs />
+        </div>
+    );
+}
+
+/* ── InsightsTabs ─────────────────────────────────────────────────────────── */
+function InsightsTabs() {
+    const TABS = [
+        { id: 'weekly',   label: 'Weekly Review',    icon: BookOpen },
+        { id: 'signals',  label: 'Signal Accuracy',  icon: BarChart3 },
+        { id: 'portfolios', label: 'Portfolios',     icon: Briefcase },
+    ];
+    const [active, setActive] = useState('weekly');
+
+    return (
+        <div>
+            {/* Tab bar */}
+            <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid #e2e8f0', paddingBottom: 0 }}>
+                {TABS.map(({ id, label, icon: Icon }) => {
+                    const isActive = active === id;
+                    return (
+                        <button
+                            key={id}
+                            onClick={() => setActive(id)}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: 6,
+                                padding: '8px 16px', border: 'none', background: 'none',
+                                cursor: 'pointer', fontSize: 13, fontWeight: isActive ? 700 : 500,
+                                color: isActive ? '#2563eb' : '#64748b',
+                                borderBottom: isActive ? '2px solid #2563eb' : '2px solid transparent',
+                                marginBottom: -1,
+                                transition: 'all 0.15s',
+                            }}
+                        >
+                            <Icon size={14} />{label}
+                        </button>
+                    );
+                })}
+            </div>
+
+            {active === 'weekly'     && <WeeklyReview />}
+            {active === 'signals'    && <SignalAccuracy />}
+            {active === 'portfolios' && <Portfolios />}
         </div>
     );
 }

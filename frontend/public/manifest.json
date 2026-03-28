@@ -1,0 +1,38 @@
+{
+  "short_name": "StockEye",
+  "name": "StockEye — AI Trading for Indian Markets",
+  "description": "Autonomous Claude-powered paper trading with NSE-specific signals: FII/DII flows, F&O PCR, delivery volume, earnings blackout.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#2563eb",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Advisor",
+      "url": "/advisor",
+      "description": "AI trading advisor"
+    },
+    {
+      "name": "Portfolio",
+      "url": "/portfolio",
+      "description": "View portfolio"
+    },
+    {
+      "name": "Screener",
+      "url": "/screener",
+      "description": "Signal screener"
+    }
+  ],
+  "categories": ["finance", "productivity"]
+}

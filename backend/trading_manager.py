@@ -84,6 +84,33 @@ def init_trading_tables():
             pnl_pct         REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, date))''')
+        # Signal scores logged at trade entry — used for feedback loop and track record
+        conn.execute('''CREATE TABLE IF NOT EXISTS trade_signals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         TEXT NOT NULL,
+            trade_id        INTEGER,
+            ticker          TEXT NOT NULL,
+            side            TEXT NOT NULL,
+            entry_price     REAL,
+            stop_loss       REAL,
+            composite_score REAL,
+            fii_dii_score   REAL,
+            pcr_score       REAL,
+            technical_score REAL,
+            delivery_score  REAL,
+            news_score      REAL,
+            india_vix       REAL,
+            fii_net_cr      REAL,
+            nifty_pcr       REAL,
+            delivery_pct    REAL,
+            ai_confidence   REAL,
+            ai_reasoning    TEXT,
+            exit_price      REAL,
+            exit_date       TEXT,
+            pnl             REAL,
+            pnl_pct         REAL,
+            exit_reason     TEXT,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     logger.info("Trading tables initialized")
 
 
@@ -183,6 +210,12 @@ def _execute_in_conn(conn, user_id, order_id, execution_price, ticker, name, sid
         else:
             conn.execute('UPDATE trading_portfolio SET quantity=? WHERE user_id=? AND ticker=?', (new_qty, user_id, ticker))
 
+        # Close signal log for feedback loop (non-blocking)
+        try:
+            close_trade_signal(user_id, ticker, execution_price, exit_reason="sell_order")
+        except Exception:
+            pass
+
 
 def cancel_order(user_id, order_id):
     with get_db_connection() as conn:
@@ -273,15 +306,16 @@ def snapshot_portfolio(user_id: str) -> None:
     balance_row = get_trading_balance(user_id)
     prices      = get_bulk_prices([h['ticker'] for h in holdings]) if holdings else {}
     market_val = sum(h['quantity'] * (prices.get(h['ticker']) or h['avg_buy_price']) for h in holdings)
+    cost_basis = sum(h['quantity'] * h['avg_buy_price'] for h in holdings)
     total      = balance_row['balance'] + market_val
-    today       = datetime.utcnow().strftime('%Y-%m-%d')
+    today      = datetime.utcnow().strftime('%Y-%m-%d')
     with get_db_connection() as conn:
         prev = conn.execute(
             "SELECT portfolio_value FROM trading_daily_snapshots WHERE user_id = ? AND date < ? ORDER BY date DESC LIMIT 1",
             (user_id, today)
         ).fetchone()
-        # First day: compare against cash + cost basis (what we started with before market moves)
-        prev_val = prev['portfolio_value'] if prev else (balance_row['balance'] + market_val)
+        # First day: baseline is cash + cost_basis (what was deployed, before market moves)
+        prev_val = prev['portfolio_value'] if prev else (balance_row['balance'] + cost_basis)
         pnl      = round(total - prev_val, 2)
         pnl_pct  = round(pnl / prev_val * 100, 2) if prev_val else 0
         conn.execute(
@@ -305,6 +339,134 @@ def get_performance_history(user_id: str, days: int = 30) -> list:
     except Exception as e:
         logger.warning(f"get_performance_history: table may not exist yet — {e}")
         return []
+
+
+def log_trade_signals(user_id: str, trade_id: int | None, ticker: str, side: str,
+                      entry_price: float, stop_loss: float | None,
+                      signal_scores: dict, market_data: dict,
+                      ai_confidence: float, ai_reasoning: str) -> None:
+    """Log signal scores at time of trade execution for feedback loop and track record."""
+    try:
+        scores = signal_scores or {}
+        md     = market_data or {}
+        with get_db_connection() as conn:
+            conn.execute(
+                """INSERT INTO trade_signals
+                   (user_id, trade_id, ticker, side, entry_price, stop_loss,
+                    composite_score, fii_dii_score, pcr_score, technical_score,
+                    delivery_score, news_score, india_vix, fii_net_cr, nifty_pcr,
+                    delivery_pct, ai_confidence, ai_reasoning)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    user_id, trade_id, ticker, side, entry_price, stop_loss,
+                    scores.get("composite"),
+                    scores.get("fii_dii",   {}).get("score"),
+                    scores.get("pcr",       {}).get("score"),
+                    scores.get("technical", {}).get("score"),
+                    scores.get("delivery",  {}).get("score"),
+                    scores.get("news",      {}).get("score"),
+                    md.get("india_vix"),
+                    md.get("fii_net_cr"),
+                    md.get("nifty_pcr"),
+                    md.get("delivery_pct"),
+                    ai_confidence,
+                    ai_reasoning,
+                )
+            )
+    except Exception as e:
+        logger.warning(f"log_trade_signals failed (non-fatal): {e}")
+
+
+def close_trade_signal(user_id: str, ticker: str, exit_price: float,
+                       exit_reason: str = "manual") -> None:
+    """Fill in exit data when a SELL executes — completes the feedback loop."""
+    try:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT id, entry_price FROM trade_signals "
+                "WHERE user_id=? AND ticker=? AND exit_price IS NULL "
+                "AND side='BUY' ORDER BY created_at DESC LIMIT 1",
+                (user_id, ticker)
+            ).fetchone()
+            if not row:
+                return
+            entry   = float(row["entry_price"] or exit_price)
+            pnl_pct = round((exit_price - entry) / entry * 100, 2) if entry else 0
+            pnl     = round(exit_price - entry, 2)
+            today   = datetime.utcnow().strftime("%Y-%m-%d")
+            conn.execute(
+                "UPDATE trade_signals SET exit_price=?, exit_date=?, pnl=?, pnl_pct=?, exit_reason=? "
+                "WHERE id=?",
+                (exit_price, today, pnl, pnl_pct, exit_reason, row["id"])
+            )
+    except Exception as e:
+        logger.warning(f"close_trade_signal failed (non-fatal): {e}")
+
+
+def get_track_record(user_id: str | None = None, days: int = 180) -> dict:
+    """
+    Compute performance track record for the public dashboard.
+    If user_id is None, aggregates across all users (for public leaderboard).
+    """
+    try:
+        cutoff = (datetime.utcnow() - __import__('datetime').timedelta(days=days)).strftime("%Y-%m-%d")
+        with get_db_connection() as conn:
+            where_user  = "AND user_id = ?" if user_id else ""
+            params_user = (user_id,) if user_id else ()
+
+            # Closed trades with outcomes
+            closed = conn.execute(
+                f"SELECT ticker, entry_price, exit_price, pnl_pct, created_at, exit_date "
+                f"FROM trade_signals WHERE exit_price IS NOT NULL "
+                f"AND created_at >= ? {where_user} ORDER BY created_at DESC",
+                (cutoff, *params_user)
+            ).fetchall()
+
+            total_trades = len(closed)
+            if total_trades == 0:
+                return {"total_trades": 0, "win_rate": 0, "avg_return_pct": 0,
+                        "profit_factor": 0, "trades": []}
+
+            wins      = [t for t in closed if float(t["pnl_pct"] or 0) > 0]
+            losses    = [t for t in closed if float(t["pnl_pct"] or 0) <= 0]
+            win_rate  = round(len(wins) / total_trades * 100, 1)
+            avg_ret   = round(sum(float(t["pnl_pct"] or 0) for t in closed) / total_trades, 2)
+            sum_wins  = sum(float(t["pnl_pct"] or 0) for t in wins)
+            sum_loss  = abs(sum(float(t["pnl_pct"] or 0) for t in losses))
+            pf        = round(sum_wins / sum_loss, 2) if sum_loss else 0
+
+            # Daily snapshots for equity curve
+            snaps = conn.execute(
+                f"SELECT date, portfolio_value, pnl_pct FROM trading_daily_snapshots "
+                f"WHERE date >= ? {where_user} ORDER BY date ASC",
+                (cutoff, *params_user)
+            ).fetchall()
+
+            return {
+                "total_trades":    total_trades,
+                "win_rate":        win_rate,
+                "avg_return_pct":  avg_ret,
+                "profit_factor":   pf,
+                "winning_trades":  len(wins),
+                "losing_trades":   len(losses),
+                "trades": [
+                    {
+                        "ticker":     t["ticker"],
+                        "entry_date": t["created_at"],
+                        "exit_date":  t["exit_date"],
+                        "pnl_pct":    float(t["pnl_pct"] or 0),
+                    }
+                    for t in closed[:50]   # latest 50 for display
+                ],
+                "equity_curve": [
+                    {"date": s["date"], "value": s["portfolio_value"], "daily_pct": s["pnl_pct"]}
+                    for s in snaps
+                ],
+            }
+    except Exception as e:
+        logger.warning(f"get_track_record failed: {e}")
+        return {"total_trades": 0, "win_rate": 0, "avg_return_pct": 0,
+                "profit_factor": 0, "trades": [], "equity_curve": []}
 
 
 def get_open_stop_orders() -> list:
@@ -342,11 +504,6 @@ def get_position_ages(user_id: str) -> dict:
                 first_buy = datetime.fromisoformat(first_buy.replace('Z', '+00:00').replace('+00:00', ''))
             ages[r['ticker']] = (now - first_buy).days
     return ages
-
-
-# Backward-compat shim: expose execute_order for any external callers
-def execute_order(order_id, execution_price, cursor=None):
-    logger.warning("execute_order() is deprecated — use place_order() which auto-executes MARKET orders.")
 
 
 init_trading_tables()

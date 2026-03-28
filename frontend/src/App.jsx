@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, Grid3X3, LogOut, Shield, Bot } from 'lucide-react';
+import { BarChart3, MessageSquare, Briefcase, Activity, Bell, TrendingUp, Menu, X, AlertTriangle, TrendingDown, Zap, Newspaper, Target, Flame, Grid3X3, LogOut, Shield, Bot, FlaskConical } from 'lucide-react';
 import StockEyeLogo from './components/StockEyeLogo';
 import axios from 'axios';
 import { authAxios } from './utils/api';
@@ -19,6 +19,11 @@ import Markets from './components/Markets';
 import OAuthConsent from './components/OAuthConsent';
 import AdminDashboard from './components/AdminDashboard';
 import AutoTrading from './components/AutoTrading';
+import Backtest from './components/Backtest';
+import PerformanceDashboard from './components/PerformanceDashboard';
+import PublicScreener from './components/PublicScreener';
+import TermsPage from './components/TermsPage';
+import DisclaimerPage from './components/DisclaimerPage';
 import { supabase } from './lib/supabase';
 import wsManager from './utils/websocket';
 import { toast } from 'react-toastify';
@@ -225,7 +230,8 @@ function AppShell() {
     { to: '/watchlist',   icon: TrendingUp,   label: 'Watchlist' },
     { to: '/portfolio',   icon: Briefcase,    label: 'Portfolio' },
     { to: '/chat',        icon: MessageSquare, label: 'AI Chat' },
-    { to: '/monitor',     icon: Activity,     label: 'Monitor' },
+    { to: '/monitor',     icon: Activity,       label: 'Monitor' },
+    { to: '/backtest',    icon: FlaskConical,   label: 'Backtest' },
     ...(userRole === 'admin' ? [{ to: '/admin', icon: Shield, label: 'Admin' }] : []),
   ];
 
@@ -505,6 +511,7 @@ function AppShell() {
             <Route path="/chat" element={<Chatbot apiUrl={API_URL} socket={wsManager.socket} />} />
             <Route path="/monitor" element={<MarketMonitor apiUrl={API_URL} socket={wsManager.socket} alerts={alerts} />} />
             <Route path="/auto-trading" element={<AutoTrading />} />
+            <Route path="/backtest" element={<Backtest />} />
             <Route path="/admin" element={
               <AdminRoute><AdminDashboard apiUrl={API_URL} /></AdminRoute>
             } />
@@ -609,6 +616,10 @@ function App() {
         />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/performance" element={<PerformanceDashboard />} />
+          <Route path="/screener" element={<PublicScreener />} />
+          <Route path="/terms" element={<TermsPage />} />
+          <Route path="/disclaimer" element={<DisclaimerPage />} />
           <Route path="/oauth/consent" element={
             <ProtectedRoute>
               <OAuthConsent />

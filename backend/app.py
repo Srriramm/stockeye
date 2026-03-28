@@ -1587,6 +1587,44 @@ def get_trading_trades(user_id):
     return jsonify({'trades': trades})
 
 
+@app.route('/api/performance', methods=['GET'])
+def public_performance():
+    """
+    Public track record — no auth required.
+    This is the marketing/trust page. Shows all paper trades and outcomes.
+    """
+    from trading_manager import get_track_record
+    from signal_engine import get_india_vix, get_fii_dii_today, get_nifty_pcr
+    from stock_data import get_market_indices
+
+    days = min(int(request.args.get('days', 180)), 365)
+
+    record  = get_track_record(user_id=None, days=days)   # aggregate all users
+    indices = {}
+    try:
+        indices = get_market_indices()
+    except Exception:
+        pass
+
+    market_pulse = {}
+    try:
+        market_pulse = {
+            "india_vix": get_india_vix(),
+            "fii_dii":   get_fii_dii_today(),
+            "nifty_pcr": get_nifty_pcr(),
+        }
+    except Exception:
+        pass
+
+    return jsonify({
+        "track_record":  record,
+        "market_pulse":  market_pulse,
+        "indices":       indices,
+        "days":          days,
+        "disclaimer":    "Paper trading simulation only. Not investment advice.",
+    })
+
+
 @app.route('/api/trading/portfolio', methods=['GET'])
 @require_auth
 def get_trading_portfolio_endpoint(user_id):
@@ -1625,6 +1663,533 @@ def get_trading_balance_endpoint(user_id):
     """Get trading account balance for the authenticated user."""
     balance = get_trading_balance(user_id=user_id)
     return jsonify(balance)
+
+
+@app.route('/api/trading/risk-settings', methods=['GET'])
+@require_auth
+def get_risk_settings(user_id):
+    """Return the user's current risk settings (with defaults for unset keys)."""
+    from risk_gate import get_user_risk_settings, DEFAULT_RISK_SETTINGS
+    settings = get_user_risk_settings(user_id)
+    return jsonify({"settings": settings, "defaults": DEFAULT_RISK_SETTINGS})
+
+
+@app.route('/api/trading/risk-settings', methods=['PUT'])
+@require_auth
+def update_risk_settings(user_id):
+    """Save user's risk settings. Only valid keys accepted."""
+    from risk_gate import save_user_risk_settings, DEFAULT_RISK_SETTINGS, _ensure_risk_settings_table
+    from db import get_db_connection
+    updates = request.get_json() or {}
+    # Validate numeric ranges to prevent abuse
+    clamp = {
+        "max_risk_per_trade":     (0.1,  5.0),
+        "max_single_stock_pct":   (5.0,  50.0),
+        "max_portfolio_heat":     (20.0, 90.0),
+        "max_open_positions":     (1,    20),
+        "daily_loss_limit":       (1.0,  20.0),
+        "drawdown_pause":         (5.0,  40.0),
+        "min_confidence":         (50.0, 95.0),
+        "fii_selling_block_cr":   (500,  10000),
+        "india_vix_limit":        (15.0, 40.0),
+        "min_liquidity_cr":       (1.0,  50.0),
+        "consecutive_loss_limit": (1,    10),
+        "earnings_blackout_days": (0,    5),
+    }
+    clean = {}
+    errors = []
+    for key, val in updates.items():
+        if key not in clamp:
+            continue
+        lo, hi = clamp[key]
+        try:
+            num = type(lo)(val)   # cast to int or float matching the bound type
+            if not (lo <= num <= hi):
+                errors.append(f"{key} must be between {lo} and {hi}")
+            else:
+                clean[key] = num
+        except (TypeError, ValueError):
+            errors.append(f"{key} must be a number")
+    if errors:
+        return jsonify({"error": "Validation failed", "details": errors}), 400
+    try:
+        with get_db_connection() as conn:
+            _ensure_risk_settings_table(conn)
+    except Exception:
+        pass
+    saved = save_user_risk_settings(user_id, clean)
+    return jsonify({"settings": saved, "updated": list(clean.keys())})
+
+
+@app.route('/api/trading/backtest', methods=['GET'])
+@require_auth
+@limiter.limit("10 per hour")
+def run_backtest_endpoint(user_id):
+    """
+    Run a backtest on the user's watchlist tickers (or supplied tickers).
+
+    Query params:
+      tickers  — comma-separated e.g. RELIANCE,TCS,INFY  (default: user's watchlist)
+      days     — lookback window, default 90, max 365
+      capital  — starting capital in INR, default 100000
+    """
+    from backtest import run_backtest
+    from watchlist_manager import get_watchlists
+
+    days    = min(int(request.args.get('days', 90)), 365)
+    capital = min(float(request.args.get('capital', 100_000)), 10_000_000)
+
+    tickers_param = request.args.get('tickers', '').strip()
+    if tickers_param:
+        tickers = [t.strip().upper() for t in tickers_param.split(',') if t.strip()][:20]
+    else:
+        # Pull from user's first watchlist
+        try:
+            watchlists = get_watchlists(user_id)
+            tickers = []
+            for wl in watchlists:
+                tickers.extend([s['ticker'] for s in wl.get('stocks', [])])
+            tickers = list(dict.fromkeys(tickers))[:20]  # deduplicate, keep order
+        except Exception:
+            tickers = []
+
+    if not tickers:
+        return jsonify({'error': 'No tickers found. Add stocks to your watchlist or pass ?tickers='}), 400
+
+    try:
+        result = run_backtest(
+            tickers=tickers,
+            days=days,
+            starting_capital=capital,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Backtest error for user {user_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Backtest failed', 'detail': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# WEEKLY AI PORTFOLIO REVIEW
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/trading/weekly-review', methods=['GET'])
+@require_auth
+@limiter.limit("20 per hour")
+def weekly_portfolio_review(user_id):
+    """
+    Generate an AI-written weekly portfolio review.
+    Pulls 7-day trade history + current portfolio + market regime,
+    then asks Claude Haiku to write a structured review.
+    """
+    import json as _json
+    from trading_manager import get_performance_history, get_trading_portfolio, get_trading_balance
+    from signal_engine import get_market_regime, get_fii_dii_today, get_india_vix
+
+    try:
+        history  = get_performance_history(user_id, days=7) or []
+        holdings = get_trading_portfolio(user_id=user_id) or []
+        balance  = get_trading_balance(user_id=user_id) or {}
+        regime   = get_market_regime()
+        fii_dii  = get_fii_dii_today()
+        vix      = get_india_vix()
+
+        # Compute week metrics
+        total_pnl   = sum(float(h.get("daily_pnl", 0) or 0) for h in history)
+        wins        = sum(1 for h in history if (h.get("daily_pnl") or 0) > 0)
+        losses      = sum(1 for h in history if (h.get("daily_pnl") or 0) < 0)
+        total_value = float((balance.get("balance") or 0)) + float((balance.get("invested") or 0)) or 100000
+        week_return_pct = (total_pnl / (total_value - total_pnl) * 100) if (total_value - total_pnl) > 0 else 0
+
+        summary_data = {
+            "week_pnl_inr":    round(total_pnl, 2),
+            "week_return_pct": round(week_return_pct, 2),
+            "up_days":         wins,
+            "down_days":       losses,
+            "open_positions":  len(holdings),
+            "tickers_held":    [h["ticker"] for h in holdings],
+            "market_regime":   regime.get("regime", "UNKNOWN"),
+            "india_vix":       vix,
+            "fii_net_cr":      fii_dii.get("fii_net_cr"),
+        }
+
+        # Ask Claude Haiku for a written review
+        import anthropic as _ant
+        ant_key = os.getenv("ANTHROPIC_API_KEY", "")
+        narrative = None
+
+        if ant_key and not ant_key.startswith("sk-ant-..."):
+            try:
+                client = _ant.Anthropic(api_key=ant_key)
+                prompt = (
+                    f"You are a portfolio review assistant for an Indian equity paper trading account.\n\n"
+                    f"Weekly snapshot:\n{_json.dumps(summary_data, indent=2)}\n\n"
+                    f"Write a concise weekly review in 3 sections:\n"
+                    f"1. PERFORMANCE SUMMARY (2-3 sentences about the week's result)\n"
+                    f"2. MARKET CONTEXT (1-2 sentences about regime/VIX/FII)\n"
+                    f"3. NEXT WEEK FOCUS (2-3 specific actionable suggestions)\n\n"
+                    f"Keep it sharp, data-driven, and under 200 words total. No fluff."
+                )
+                resp = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=400,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = resp.content[0].text.strip()
+                # Parse sections
+                sections = {}
+                current = None
+                for line in text.split("\n"):
+                    if "PERFORMANCE" in line.upper():
+                        current = "performance"
+                        sections[current] = []
+                    elif "MARKET" in line.upper() and "CONTEXT" in line.upper():
+                        current = "market"
+                        sections[current] = []
+                    elif "NEXT WEEK" in line.upper() or "FOCUS" in line.upper():
+                        current = "focus"
+                        sections[current] = []
+                    elif current and line.strip():
+                        sections[current].append(line.strip())
+                narrative = {k: " ".join(v) for k, v in sections.items()}
+                if not narrative:
+                    narrative = {"summary": text}
+            except Exception as e:
+                logger.warning(f"Weekly review AI failed: {e}")
+                narrative = None
+
+        if narrative is None:
+            narrative = {
+                "performance": (
+                    f"Portfolio returned {week_return_pct:+.2f}% this week "
+                    f"(₹{total_pnl:+,.0f}). {wins} up days, {losses} down days."
+                ),
+                "market": (
+                    f"Market regime: {regime.get('regime', 'UNKNOWN')}. "
+                    f"India VIX at {vix or 'N/A'}. "
+                    f"FII flows: ₹{fii_dii.get('fii_net_cr') or 'N/A'}cr."
+                ),
+                "focus": (
+                    f"Monitor {len(holdings)} open position(s). "
+                    f"Follow risk rules strictly in {regime.get('regime', 'current')} regime."
+                ),
+            }
+
+        return jsonify({
+            "period": "last_7_days",
+            "metrics": summary_data,
+            "narrative": narrative,
+            "daily_history": history,
+        })
+
+    except Exception as e:
+        logger.error(f"Weekly review error for {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Could not generate review", "detail": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# SIGNAL ACCURACY DASHBOARD
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/trading/signal-accuracy', methods=['GET'])
+@require_auth
+def signal_accuracy_endpoint(user_id):
+    """
+    Analyze which signals were most predictive for the user's completed trades.
+    Returns per-signal accuracy, correlation with return, and top/worst signals.
+    """
+    from db import get_db_connection
+
+    days  = min(int(request.args.get('days', 90)), 365)
+    scope = request.args.get('scope', 'user')   # 'user' or 'all'
+
+    # Column order: fii_dii_score, pcr_score, technical_score, delivery_score, news_score, entry_price, exit_price
+    SELECT_COLS = "fii_dii_score, pcr_score, technical_score, delivery_score, news_score, entry_price, exit_price"
+
+    try:
+        with get_db_connection() as conn:
+            if scope == 'all':
+                cur = conn.execute(
+                    f"""SELECT {SELECT_COLS}
+                       FROM trade_signals
+                       WHERE exit_price IS NOT NULL AND entry_price > 0
+                         AND created_at >= datetime('now', ?)
+                       ORDER BY created_at DESC LIMIT 500""",
+                    (f"-{days} days",)
+                )
+            else:
+                cur = conn.execute(
+                    f"""SELECT {SELECT_COLS}
+                       FROM trade_signals
+                       WHERE exit_price IS NOT NULL AND entry_price > 0
+                         AND user_id = ?
+                         AND created_at >= datetime('now', ?)
+                       ORDER BY created_at DESC LIMIT 500""",
+                    (user_id, f"-{days} days")
+                )
+            rows = cur.fetchall()
+
+        if not rows:
+            return jsonify({"message": "No completed trades yet", "signal_stats": {}, "total_trades": 0})
+
+        # signal_keys maps to DB column positions 0-4
+        # global_cues and fo_oi don't have dedicated columns yet — skip them
+        signal_keys = ["fii_dii", "pcr", "technical", "delivery", "news"]
+        buckets = {k: {"scores": [], "returns": [], "wins": 0, "losses": 0} for k in signal_keys}
+        returns_all = []
+
+        for row in rows:
+            try:
+                # row: fii_dii_score(0), pcr_score(1), technical_score(2), delivery_score(3), news_score(4), entry_price(5), exit_price(6)
+                col_scores = {
+                    "fii_dii":   float(row[0] or 50),
+                    "pcr":       float(row[1] or 50),
+                    "technical": float(row[2] or 50),
+                    "delivery":  float(row[3] or 50),
+                    "news":      float(row[4] or 50),
+                }
+                ret    = (float(row[6]) - float(row[5])) / float(row[5]) * 100
+                is_win = ret > 0
+                returns_all.append(ret)
+                for k in signal_keys:
+                    s = col_scores[k]
+                    buckets[k]["scores"].append(s)
+                    buckets[k]["returns"].append(ret)
+                    if is_win:  buckets[k]["wins"] += 1
+                    else:       buckets[k]["losses"] += 1
+            except Exception:
+                continue
+
+        import math
+        def _pearson(xs, ys):
+            n = len(xs)
+            if n < 5: return 0.0
+            mx, my = sum(xs)/n, sum(ys)/n
+            num = sum((x-mx)*(y-my) for x, y in zip(xs, ys))
+            den = math.sqrt(sum((x-mx)**2 for x in xs) * sum((y-my)**2 for y in ys))
+            return round(num / den, 3) if den > 0 else 0.0
+
+        signal_stats = {}
+        for k, b in buckets.items():
+            if not b["scores"]:
+                continue
+            n     = len(b["scores"])
+            corr  = _pearson(b["scores"], b["returns"])
+            avg_score_on_wins  = (sum(b["scores"][i] for i in range(n) if b["returns"][i] > 0) /
+                                   max(1, b["wins"]))
+            avg_score_on_loss  = (sum(b["scores"][i] for i in range(n) if b["returns"][i] <= 0) /
+                                   max(1, b["losses"]))
+            signal_stats[k] = {
+                "correlation":         corr,
+                "avg_score_on_wins":   round(avg_score_on_wins, 1),
+                "avg_score_on_losses": round(avg_score_on_loss, 1),
+                "predictive_gap":      round(avg_score_on_wins - avg_score_on_loss, 1),
+                "n_trades":            n,
+            }
+
+        ranked = sorted(signal_stats.items(), key=lambda x: x[1]["correlation"], reverse=True)
+        avg_return = sum(returns_all) / len(returns_all) if returns_all else 0
+        win_rate   = sum(1 for r in returns_all if r > 0) / len(returns_all) * 100 if returns_all else 0
+
+        return jsonify({
+            "total_trades":   len(rows),
+            "avg_return_pct": round(avg_return, 2),
+            "win_rate_pct":   round(win_rate, 1),
+            "top_signal":     ranked[0][0]  if ranked else None,
+            "worst_signal":   ranked[-1][0] if ranked else None,
+            "signal_stats":   signal_stats,
+            "days":           days,
+        })
+
+    except Exception as e:
+        logger.error(f"Signal accuracy error for {user_id}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+# MULTIPLE PORTFOLIOS
+# ═══════════════════════════════════════════════════════════════
+
+def _ensure_portfolios_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_portfolios (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            color TEXT DEFAULT '#2563eb',
+            description TEXT DEFAULT '',
+            starting_balance REAL DEFAULT 100000.0,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, name)
+        )
+    """)
+    conn.commit()
+
+
+@app.route('/api/portfolios', methods=['GET'])
+@require_auth
+def list_portfolios(user_id):
+    """List all portfolios for the user. Always includes 'Default'."""
+    from db import get_db_connection
+    from trading_manager import get_trading_balance
+
+    with get_db_connection() as conn:
+        _ensure_portfolios_table(conn)
+        rows = conn.execute(
+            "SELECT id, name, color, description, starting_balance, created_at FROM user_portfolios WHERE user_id=? ORDER BY created_at",
+            (user_id,)
+        ).fetchall()
+
+    portfolios = [
+        {"id": r[0], "name": r[1], "color": r[2], "description": r[3],
+         "starting_balance": r[4], "created_at": r[5]}
+        for r in rows
+    ]
+
+    # Always prepend the default portfolio (backed by existing trading tables)
+    balance_data = get_trading_balance(user_id=user_id) or {}
+    cash    = float(balance_data.get("balance", 0) or 0)
+    invested = float(balance_data.get("invested", 0) or 0)
+    default_pf = {
+        "id": "default",
+        "name": "Default Portfolio",
+        "color": "#2563eb",
+        "description": "Main paper trading portfolio",
+        "starting_balance": 100000.0,
+        "balance": cash,
+        "total_value": cash + invested,
+        "is_default": True,
+    }
+    return jsonify({"portfolios": [default_pf] + portfolios})
+
+
+@app.route('/api/portfolios', methods=['POST'])
+@require_auth
+def create_portfolio(user_id):
+    """Create a new named portfolio."""
+    import uuid
+    from db import get_db_connection
+
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()[:50]
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    color       = data.get("color", "#2563eb")
+    description = (data.get("description") or "")[:200]
+    starting_balance = min(float(data.get("starting_balance", 100000)), 10_000_000)
+
+    portfolio_id = str(uuid.uuid4())[:8]
+
+    try:
+        with get_db_connection() as conn:
+            _ensure_portfolios_table(conn)
+            conn.execute(
+                "INSERT INTO user_portfolios (id, user_id, name, color, description, starting_balance) VALUES (?,?,?,?,?,?)",
+                (portfolio_id, user_id, name, color, description, starting_balance)
+            )
+            conn.commit()
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            return jsonify({"error": f"Portfolio '{name}' already exists"}), 409
+        return jsonify({"error": str(e)}), 500
+
+    log_event(user_id, "portfolio.created", portfolio_id)
+    return jsonify({"id": portfolio_id, "name": name, "color": color,
+                    "starting_balance": starting_balance}), 201
+
+
+@app.route('/api/portfolios/<portfolio_id>', methods=['DELETE'])
+@require_auth
+def delete_portfolio(user_id, portfolio_id):
+    """Delete a named portfolio (cannot delete 'default')."""
+    if portfolio_id == "default":
+        return jsonify({"error": "Cannot delete the default portfolio"}), 400
+
+    from db import get_db_connection
+    with get_db_connection() as conn:
+        _ensure_portfolios_table(conn)
+        rows = conn.execute(
+            "DELETE FROM user_portfolios WHERE id=? AND user_id=?",
+            (portfolio_id, user_id)
+        ).rowcount
+        conn.commit()
+
+    if rows == 0:
+        return jsonify({"error": "Portfolio not found"}), 404
+
+    log_event(user_id, "portfolio.deleted", portfolio_id)
+    return jsonify({"deleted": portfolio_id})
+
+
+# ═══════════════════════════════════════════════════════════════
+# ENHANCED PUBLIC SCREENER (no auth)
+# ═══════════════════════════════════════════════════════════════
+
+@app.route('/api/screener/enhanced', methods=['GET'])
+def enhanced_public_screener():
+    """
+    Public screener showing top stocks ranked by composite signal score.
+    Includes FII/DII context, F&O PCR, technical, delivery, news.
+    No auth required — this is the marketing funnel.
+    Cached aggressively (15 min) to avoid hammering NSE.
+    """
+    from signal_engine import (score_stock, get_fii_dii_today, get_india_vix,
+                                get_nifty_pcr, get_market_regime, get_sector_rotation,
+                                _cache_get, _cache_set)
+
+    cached = _cache_get("enhanced_screener", ttl=900)
+    if cached:
+        return jsonify(cached)
+
+    # Fixed universe: Nifty 50 + midcap leaders (no personal watchlist needed)
+    UNIVERSE = [
+        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR",
+        "KOTAKBANK", "AXISBANK", "BAJFINANCE", "LT", "SBIN", "MARUTI",
+        "SUNPHARMA", "WIPRO", "HCLTECH", "TITAN", "ULTRACEMCO", "ASIANPAINT",
+        "POWERGRID", "NTPC", "ONGC", "TATAMOTORS", "HINDALCO", "JSWSTEEL",
+        "TATASTEEL", "INDUSINDBK", "DIVISLAB", "DRREDDY", "CIPLA", "TECHM",
+    ]
+
+    results = []
+    for ticker in UNIVERSE:
+        try:
+            s = score_stock(ticker)
+            results.append({
+                "ticker":          ticker,
+                "composite_score": s["composite_score"],
+                "data_quality":    s["data_quality"],
+                "signal_breakdown": {
+                    k: round(v["score"]) for k, v in s["scores"].items()
+                    if v.get("confidence", 0) > 0
+                },
+                "delivery_pct":   s["market_data"].get("delivery_pct"),
+            })
+        except Exception:
+            pass
+
+    results.sort(key=lambda x: x["composite_score"], reverse=True)
+
+    market_context = {}
+    try:
+        market_context = {
+            "india_vix":   get_india_vix(),
+            "fii_dii":     get_fii_dii_today(),
+            "nifty_pcr":   get_nifty_pcr(),
+            "regime":      get_market_regime().get("regime"),
+            "sector_rotation": get_sector_rotation().get("sectors", [])[:5],
+        }
+    except Exception:
+        pass
+
+    payload = {
+        "stocks":         results[:20],
+        "top_picks":      results[:5],
+        "market_context": market_context,
+        "total_scanned":  len(UNIVERSE),
+        "disclaimer":     "Signal scores are for paper trading research only. Not investment advice.",
+    }
+    _cache_set("enhanced_screener", payload)
+    return jsonify(payload)
 
 
 @app.route('/api/trading/reset', methods=['POST'])
