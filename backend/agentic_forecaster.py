@@ -295,20 +295,7 @@ def _set_cache(ticker: str, days: int, result: dict):
         pass
 
 
-# ── Anthropic client ─────────────────────────────────────────────
-_client = None
-
-
-def _get_client():
-    global _client
-    if _client is None:
-        import anthropic
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            logger.error("ANTHROPIC_API_KEY not set — agentic forecaster unavailable")
-            return None
-        _client = anthropic.Anthropic(api_key=key)
-    return _client
+import llm_client
 
 
 # ── Tool executors ────────────────────────────────────────────────
@@ -428,114 +415,52 @@ def run_agentic_forecast(ticker: str, days: int = 30) -> dict | None:
         cached["from_cache"] = True
         return cached
 
-    client = _get_client()
-    if not client:
+    if not llm_client.is_available():
+        logger.error("No LLM provider configured — agentic forecaster unavailable")
         return None
 
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                f"Analyse {ticker} and produce a {days}-day price forecast.\n"
-                f"Today: {date.today().isoformat()}\n\n"
-                f"Work systematically: start with get_price_data, then gather technical, "
-                f"ML forecast, news, and fundamental evidence before submitting."
-            ),
-        }
-    ]
+    user_prompt = (
+        f"Analyse {ticker} and produce a {days}-day price forecast.\n"
+        f"Today: {date.today().isoformat()}\n\n"
+        f"Work systematically: start with get_price_data, then gather technical, "
+        f"ML forecast, news, and fundamental evidence before submitting."
+    )
 
-    model          = MODEL_FAST
-    data_sources   = []
-    forecast_result = None
+    # Escalate to the deep model tier on extreme technical/volatility signals.
+    def _escalate(name, inp, result, deep):
+        result = result or {}
+        if name == "get_technical_indicators":
+            rsi = float(result.get("rsi") or 50)
+            if rsi <= RSI_ESCALATE_LOW or rsi >= RSI_ESCALATE_HIGH:
+                logger.info(f"Escalated to deep model for {ticker} (RSI={rsi:.1f})")
+                return True
+        if name == "get_risk_metrics":
+            vol = float(result.get("annual_volatility_pct") or 0)
+            if vol > 45:
+                logger.info(f"Escalated to deep model for {ticker} (vol={vol:.1f}%)")
+                return True
+        return False
 
-    for iteration in range(MAX_ITERATIONS):
-        # Force-submit nudge after 5 data-gathering rounds to prevent stalling
-        if iteration == 5 and not forecast_result:
-            messages.append({
-                "role": "user",
-                "content": (
-                    "You have gathered enough data. "
-                    "Call submit_forecast NOW with your best assessment. "
-                    "Do not call any more data tools."
-                ),
-            })
+    loop = llm_client.run_agent_loop(
+        system=SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        tools=FORECAST_TOOLS,
+        dispatch=lambda name, inp: _execute_tool(name, inp, ticker, days),
+        terminal_tools={"submit_forecast"},
+        max_iterations=MAX_ITERATIONS,
+        temperature=0.2,
+        max_tokens=4096,
+        force_terminal_at=5,
+        force_terminal_message=(
+            "You have gathered enough data. Call submit_forecast NOW with your best "
+            "assessment. Do not call any more data tools."
+        ),
+        escalate=_escalate,
+    )
 
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=4096,
-                temperature=0.2,
-                system=SYSTEM_PROMPT,
-                tools=FORECAST_TOOLS,
-                messages=messages,
-            )
-        except Exception as exc:
-            logger.error(f"Claude API error in agentic forecaster (iter {iteration}): {exc}")
-            break
-
-        logger.debug(
-            f"[{ticker}] iter={iteration} stop_reason={response.stop_reason} "
-            f"blocks={[b.type for b in response.content]}"
-        )
-
-        messages.append({"role": "assistant", "content": response.content})
-
-        if response.stop_reason == "end_turn":
-            logger.warning(f"[{ticker}] Claude ended turn without submitting (iter {iteration})")
-            break
-        if response.stop_reason != "tool_use":
-            logger.warning(f"[{ticker}] Unexpected stop_reason={response.stop_reason} (iter {iteration})")
-            break
-
-        tool_results = []
-        loop_done    = False
-
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-
-            tool_name  = block.name
-            tool_input = block.input
-
-            # ── Final answer ──────────────────────────────────────
-            if tool_name == "submit_forecast":
-                forecast_result = dict(tool_input)
-                tool_results.append({
-                    "type":        "tool_result",
-                    "tool_use_id": block.id,
-                    "content":     json.dumps({"status": "accepted"}),
-                })
-                loop_done = True
-                break
-
-            # ── Execute data tool ─────────────────────────────────
-            result = _execute_tool(tool_name, tool_input, ticker, days)
-            data_sources.append(tool_name)
-            logger.debug(f"[{ticker}] tool={tool_name} → keys={list(result.keys()) if isinstance(result, dict) else type(result)}")
-
-            # ── Model escalation on extreme signals ───────────────
-            if tool_name == "get_technical_indicators" and model == MODEL_FAST:
-                rsi = float(result.get("rsi") or 50)
-                if rsi <= RSI_ESCALATE_LOW or rsi >= RSI_ESCALATE_HIGH:
-                    model = MODEL_DEEP
-                    logger.info(f"Escalated to {MODEL_DEEP} for {ticker} (RSI={rsi:.1f})")
-
-            if tool_name == "get_risk_metrics" and model == MODEL_FAST:
-                vol = float(result.get("annual_volatility_pct") or 0)
-                if vol > 45:
-                    model = MODEL_DEEP
-                    logger.info(f"Escalated to {MODEL_DEEP} for {ticker} (vol={vol:.1f}%)")
-
-            tool_results.append({
-                "type":        "tool_result",
-                "tool_use_id": block.id,
-                "content":     json.dumps(result, default=str),
-            })
-
-        messages.append({"role": "user", "content": tool_results})
-
-        if loop_done:
-            break
+    forecast_result = loop.get("terminal_result")
+    data_sources = loop.get("tools_called", [])
+    model = loop.get("model")
 
     if not forecast_result:
         logger.warning(f"Agentic forecaster produced no result for {ticker}")

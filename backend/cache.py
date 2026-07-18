@@ -16,26 +16,41 @@ import os
 import json
 import hashlib
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 _redis_client = None
+_redis_unavailable_until = 0.0   # epoch seconds; 0 means "never failed yet"
+_REDIS_RETRY_INTERVAL = 60       # seconds before retrying after a failure
 
 
 def _get_redis():
-    """Return a shared Redis client, or None if unavailable."""
-    global _redis_client
-    if _redis_client is None:
-        redis_url = os.getenv('REDIS_URL')
-        if redis_url:
-            try:
-                import redis
-                _redis_client = redis.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
-                _redis_client.ping()
-            except Exception as e:
-                logger.warning(f"Redis unavailable for data cache: {e}")
-                _redis_client = None
-    return _redis_client
+    """Return a shared Redis client, or None if unavailable.
+
+    Uses a 60-second circuit-breaker so a missing Redis server doesn't spam
+    the logs or block every request with a connect timeout.
+    """
+    global _redis_client, _redis_unavailable_until
+    if _redis_client is not None:
+        return _redis_client
+    now = time.monotonic()
+    if now < _redis_unavailable_until:
+        return None   # still in cooldown — skip silently
+    redis_url = os.getenv('REDIS_URL')
+    if not redis_url:
+        return None
+    try:
+        import redis
+        client = redis.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
+        client.ping()
+        _redis_client = client
+        _redis_unavailable_until = 0.0
+        return _redis_client
+    except Exception as e:
+        logger.warning(f"Redis unavailable for data cache: {e}")
+        _redis_unavailable_until = now + _REDIS_RETRY_INTERVAL
+        return None
 
 
 def _get(key: str):

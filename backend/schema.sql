@@ -343,3 +343,73 @@ CREATE INDEX IF NOT EXISTS idx_agent_recs_user
     ON agent_recommendations(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_recs_unread
     ON agent_recommendations(user_id, is_read, is_dismissed);
+
+-- ─── Broker Connections (live trading) ───────────────────────────────────────
+-- Stores per-user broker OAuth access tokens (ENCRYPTED at rest) + expiry.
+-- Kite Connect tokens expire daily (~6 AM IST), so expires_at drives the
+-- "needs_relink" state. access_token is Fernet-encrypted by broker_manager.py;
+-- never store a raw token here.
+CREATE TABLE IF NOT EXISTS broker_tokens (
+    id           SERIAL PRIMARY KEY,
+    user_id      UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    broker       TEXT NOT NULL DEFAULT 'zerodha',
+    access_token TEXT,                       -- Fernet-encrypted
+    public_token TEXT,
+    connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at   TIMESTAMP,                  -- token validity (next ~6 AM IST)
+    status       TEXT DEFAULT 'connected',   -- 'connected' | 'expired' | 'revoked'
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, broker)
+);
+ALTER TABLE broker_tokens ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own_broker_tokens ON broker_tokens
+    FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
+CREATE INDEX IF NOT EXISTS idx_broker_tokens_user ON broker_tokens(user_id, broker);
+
+-- Per-user broker / live-trading settings. The live_trading_enabled flag is the
+-- hard kill-switch: while FALSE, no real order can ever be placed, regardless of
+-- approvals. Rupee caps bound real-money exposure on top of the % rules in RiskGate.
+CREATE TABLE IF NOT EXISTS broker_settings (
+    user_id                  UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    live_trading_enabled     BOOLEAN DEFAULT FALSE,
+    max_order_value_inr      REAL DEFAULT 5000,    -- max ₹ per single live order
+    max_daily_deployment_inr REAL DEFAULT 25000,   -- max ₹ deployed in live buys per day
+    updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE broker_settings ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own_broker_settings ON broker_settings
+    FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
+
+-- ─── Proposed Orders (approval-gated live execution) ─────────────────────────
+-- The agentic trader writes PENDING proposals here instead of executing when a
+-- live broker is connected. Nothing reaches the broker until the user approves
+-- (via Telegram or web). Paper mode bypasses this table entirely.
+CREATE TABLE IF NOT EXISTS proposed_orders (
+    id               SERIAL PRIMARY KEY,
+    user_id          UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    ticker           TEXT NOT NULL,
+    name             TEXT,
+    side             TEXT NOT NULL,            -- 'BUY' | 'SELL'
+    order_type       TEXT NOT NULL DEFAULT 'MARKET',
+    quantity         REAL NOT NULL,
+    price            REAL,                     -- indicative price at proposal time
+    stop_loss        REAL,
+    limit_price      REAL,
+    confidence       REAL,
+    reasoning        TEXT DEFAULT '',
+    risk_gate_result TEXT DEFAULT '{}',        -- JSON: passed + any failures
+    status           TEXT DEFAULT 'PENDING',   -- PENDING|APPROVED|REJECTED|EXPIRED|FILLED|FAILED
+    broker           TEXT DEFAULT 'zerodha',
+    broker_order_id  TEXT,                     -- set after live placement
+    fill_price       REAL,                     -- actual reconciled fill price
+    fill_quantity    REAL,                     -- actual reconciled fill qty
+    session_id       TEXT,
+    decided_at       TIMESTAMP,                -- when approved/rejected
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at       TIMESTAMP                 -- proposal lapses if not acted on
+);
+ALTER TABLE proposed_orders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own_proposed_orders ON proposed_orders
+    FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
+CREATE INDEX IF NOT EXISTS idx_proposed_orders_user
+    ON proposed_orders(user_id, status, created_at DESC);

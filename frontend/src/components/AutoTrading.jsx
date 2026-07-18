@@ -280,6 +280,8 @@ export default function AutoTrading() {
     const [session, setSession]               = useState(null);
     const [sessionRunning, setSessionRunning] = useState(false);
     const [brokerStatus, setBrokerStatus]     = useState(null);
+    const [proposals, setProposals]           = useState([]);
+    const [actingId, setActingId]             = useState(null);
     const [error, setError]                   = useState('');
     const [selectedTickers, setSelectedTickers] = useState([]);
     const [tickerInput, setTickerInput]         = useState('');
@@ -390,9 +392,62 @@ export default function AutoTrading() {
         } catch { /* silent */ }
     }, []);
 
+    const fetchProposals = useCallback(async () => {
+        try {
+            const res = await authAxios.get(`${API_URL}/api/auto-trading/proposals`);
+            setProposals(res.data.proposals || []);
+        } catch { /* silent */ }
+    }, []);
+
     useEffect(() => {
         fetchSession();
         fetchBroker();
+        fetchProposals();
+        // Poll for new proposals while the page is open (agent sessions run async)
+        const t = setInterval(fetchProposals, 15000);
+        return () => clearInterval(t);
+    }, [fetchProposals]);
+
+    // ── Approve / reject a live-order proposal ─────────────────────────────
+    const actOnProposal = async (id, action) => {
+        setActingId(id);
+        setError('');
+        try {
+            const res = await authAxios.post(
+                `${API_URL}/api/auto-trading/proposals/${id}/${action}`, {}, { timeout: 60000 }
+            );
+            if (res.data.error) setError(res.data.error);
+            await fetchProposals();
+        } catch (e) {
+            setError(e.response?.data?.error || `Could not ${action} proposal`);
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    // ── Complete broker link when Kite redirects back with a request_token ──
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const requestToken = params.get('broker_request_token');
+        if (params.get('broker') === 'error') {
+            setError('Broker login was cancelled or failed. Please try again.');
+            window.history.replaceState({}, '', window.location.pathname);
+            return;
+        }
+        if (!requestToken) return;
+        (async () => {
+            try {
+                const res = await authAxios.post(`${API_URL}/api/auto-trading/broker/connect`, {
+                    request_token: requestToken,
+                });
+                setBrokerStatus(res.data);
+            } catch (e) {
+                setError(e.response?.data?.error || 'Broker link failed');
+            } finally {
+                // Strip the token from the URL so it isn't re-used or bookmarked
+                window.history.replaceState({}, '', window.location.pathname);
+            }
+        })();
     }, []);
 
     // ── Run session ──────────────────────────────────────────────────────
@@ -416,12 +471,27 @@ export default function AutoTrading() {
     };
 
     // ── Broker connect ───────────────────────────────────────────────────
+    // Navigate in the SAME window so Zerodha's redirect lands back on our app
+    // (with ?broker_request_token=...), which the effect above completes.
     const connectBroker = async () => {
         try {
             const res = await authAxios.get(`${API_URL}/api/auto-trading/broker/login-url`);
-            if (res.data.login_url) window.open(res.data.login_url, '_blank');
+            if (res.data.login_url) window.location.href = res.data.login_url;
         } catch (e) {
             setError(e.response?.data?.error || 'Broker connection error');
+        }
+    };
+
+    // ── Toggle the live-trading kill-switch ────────────────────────────────
+    const toggleLiveTrading = async () => {
+        const next = !brokerStatus?.settings?.live_trading_enabled;
+        try {
+            await authAxios.put(`${API_URL}/api/auto-trading/broker/settings`, {
+                live_trading_enabled: next,
+            });
+            fetchBroker();
+        } catch (e) {
+            setError(e.response?.data?.error || 'Could not update live-trading setting');
         }
     };
 
@@ -448,12 +518,18 @@ export default function AutoTrading() {
                     {/* Broker badge */}
                     {brokerStatus && (
                         <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold ${
-                            brokerStatus.mode === 'live'
-                                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                                : 'bg-slate-50 border-slate-200 text-slate-500'
+                            brokerStatus.needs_relink
+                                ? 'bg-amber-50 border-amber-200 text-amber-700'
+                                : brokerStatus.mode === 'live'
+                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                    : 'bg-slate-50 border-slate-200 text-slate-500'
                         }`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${brokerStatus.mode === 'live' ? 'bg-emerald-500' : 'bg-slate-400'}`} />
-                            {brokerStatus.mode === 'live' ? 'Live · Zerodha' : 'Paper Mode'}
+                            <span className={`w-1.5 h-1.5 rounded-full ${
+                                brokerStatus.needs_relink ? 'bg-amber-500'
+                                : brokerStatus.mode === 'live' ? 'bg-emerald-500' : 'bg-slate-400'
+                            }`} />
+                            {brokerStatus.needs_relink ? 'Re-link Kite'
+                                : brokerStatus.mode === 'live' ? 'Live · Zerodha' : 'Paper Mode'}
                         </div>
                     )}
                     <button
@@ -492,6 +568,46 @@ export default function AutoTrading() {
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-sm flex items-center gap-2">
                     <AlertTriangle size={15} /> {error}
                     <button onClick={() => setError('')} className="ml-auto text-rose-400 hover:text-rose-600">✕</button>
+                </div>
+            )}
+
+            {/* ── Pending approvals (live mode) ── */}
+            {proposals.length > 0 && (
+                <div className="glass-panel p-5 border-2 border-amber-200">
+                    <div className="flex items-center gap-2 mb-4">
+                        <Bot size={16} className="text-amber-500" />
+                        <span className="text-sm font-bold text-slate-800">
+                            {proposals.length} trade{proposals.length > 1 ? 's' : ''} awaiting your approval
+                        </span>
+                        <span className="text-[11px] text-slate-400 ml-auto">Real orders — nothing is placed until you approve.</span>
+                    </div>
+                    <div className="space-y-3">
+                        {proposals.map((p) => (
+                            <div key={p.id} className="flex items-center gap-3 flex-wrap p-3 rounded-xl bg-white border border-slate-200">
+                                <span className={`px-2 py-1 rounded-lg text-xs font-bold ${p.side === 'BUY' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                                    {p.side}
+                                </span>
+                                <span className="font-bold text-slate-800">{p.ticker}</span>
+                                <span className="text-sm text-slate-500">{p.quantity}× @ {fmt(p.price)}</span>
+                                <span className="text-sm font-semibold text-slate-700">{fmt((p.price || 0) * (p.quantity || 0))}</span>
+                                <span className="text-xs text-slate-400 flex-1 min-w-[160px] truncate" title={p.reasoning}>{p.reasoning}</span>
+                                <button
+                                    onClick={() => actOnProposal(p.id, 'approve')}
+                                    disabled={actingId === p.id}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 transition"
+                                >
+                                    {actingId === p.id ? '…' : '✅ Approve'}
+                                </button>
+                                <button
+                                    onClick={() => actOnProposal(p.id, 'reject')}
+                                    disabled={actingId === p.id}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 transition"
+                                >
+                                    Reject
+                                </button>
+                            </div>
+                        ))}
+                    </div>
                 </div>
             )}
 
@@ -747,18 +863,51 @@ export default function AutoTrading() {
                                     <span className="font-bold text-slate-700 capitalize">{brokerStatus.broker}</span>
                                 </div>
 
-                                {brokerStatus.broker !== 'zerodha' && (
+                                {/* No live broker configured */}
+                                {brokerStatus.broker === 'paper' && (
+                                    <p className="text-[10px] text-slate-400 text-center mt-3 pt-3 border-t border-slate-100 leading-relaxed">
+                                        Set ZERODHA_API_KEY + ZERODHA_API_SECRET<br />
+                                        in .env to enable live trading
+                                    </p>
+                                )}
+
+                                {/* Zerodha configured but not connected (or token expired) */}
+                                {brokerStatus.broker === 'zerodha' && !brokerStatus.connected && (
                                     <div className="mt-3 pt-3 border-t border-slate-100">
+                                        {brokerStatus.needs_relink && (
+                                            <p className="text-[11px] text-amber-600 font-medium text-center mb-2 flex items-center justify-center gap-1">
+                                                <AlertTriangle size={11} /> Daily token expired — re-link to continue
+                                            </p>
+                                        )}
                                         <button
                                             onClick={connectBroker}
                                             className="w-full py-2 rounded-lg text-xs font-bold text-white transition"
                                             style={{ background: 'linear-gradient(135deg,#1e40af,#3730a3)' }}
                                         >
-                                            Connect Zerodha Kite
+                                            {brokerStatus.needs_relink ? 'Re-link Zerodha Kite' : 'Connect Zerodha Kite'}
                                         </button>
-                                        <p className="text-[10px] text-slate-400 text-center mt-2 leading-relaxed">
-                                            Set ZERODHA_API_KEY + ZERODHA_API_SECRET<br />
-                                            in .env to enable live trading
+                                    </div>
+                                )}
+
+                                {/* Connected live — kill-switch for approval-gated execution */}
+                                {brokerStatus.broker === 'zerodha' && brokerStatus.connected && (
+                                    <div className="mt-3 pt-3 border-t border-slate-100 space-y-2">
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-slate-500">Live trading</span>
+                                            <button
+                                                onClick={toggleLiveTrading}
+                                                className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition ${
+                                                    brokerStatus.settings?.live_trading_enabled
+                                                        ? 'bg-emerald-100 text-emerald-700'
+                                                        : 'bg-slate-100 text-slate-500'
+                                                }`}
+                                            >
+                                                {brokerStatus.settings?.live_trading_enabled ? 'ON' : 'OFF'}
+                                            </button>
+                                        </div>
+                                        <p className="text-[10px] text-slate-400 leading-relaxed">
+                                            Every real order still waits for your approval. The switch is a hard
+                                            kill-switch — while OFF, no live order can be placed.
                                         </p>
                                     </div>
                                 )}

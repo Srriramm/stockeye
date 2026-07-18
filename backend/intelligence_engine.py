@@ -215,42 +215,14 @@ def _generate_profile(ticker: str, company_name: str = None) -> dict:
     name_hint = f" (also known as '{company_name}')" if company_name else ""
     prompt = _PROMPT_TEMPLATE.format(ticker=ticker, name_hint=name_hint)
 
-    try:
-        from ai_advisor import anthropic_client, openai_client
-    except Exception:
-        anthropic_client, openai_client = None, None
-
+    import llm_client
     raw = None
-
-    # Try Anthropic (Claude Haiku — fast, cheap)
-    if anthropic_client:
-        try:
-            resp = anthropic_client.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=400,
-                temperature=0,
-                system=_SYSTEM_MSG,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.content[0].text.strip()
-        except Exception as e:
-            logger.warning(f"[intelligence] Anthropic profile failed for {ticker}: {e}")
-
-    # Try OpenAI fallback
-    if raw is None and openai_client:
-        try:
-            resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=400,
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_MSG},
-                    {"role": "user",   "content": prompt},
-                ],
-            )
-            raw = resp.choices[0].message.content.strip()
-        except Exception as e:
-            logger.warning(f"[intelligence] OpenAI profile failed for {ticker}: {e}")
+    try:
+        raw = (llm_client.generate_text(
+            system=_SYSTEM_MSG, prompt=prompt, temperature=0, max_tokens=400,
+        ) or "").strip() or None
+    except Exception as e:
+        logger.warning(f"[intelligence] AI profile failed for {ticker}: {e}")
 
     if raw:
         try:

@@ -5,31 +5,32 @@ The agent scans for market opportunities (ETF arbitrage, pairs divergence,
 mean reversion), reasons about risk/reward, sizes positions, and executes
 paper trades autonomously.
 
-Hard limits (enforced in _execute_tool, non-negotiable):
-  - Max 5%  of portfolio per single trade
-  - Max 3   concurrent open positions
-  - Max 2%  daily loss before auto-halt
-  - Paper mode unless TRADING_LIVE_ENABLED=true + broker connected
+Hard limits (enforced by RiskGate.check_all on every BUY, non-negotiable):
+  - Max 20% of portfolio in any single stock
+  - Max 5   concurrent open positions
+  - Max 5%  daily loss before HOLD-only auto-halt
+  - Paper mode unless live trading is enabled + broker connected
+
+The model is provider-agnostic (see llm_client): Gemini by default, with
+Anthropic/OpenAI as configurable alternatives.
 
 Architecture mirrors proactive_agent.py and agentic_forecaster.py.
 """
 
-import json
 import logging
-import os
 from datetime import datetime, date
 
 logger = logging.getLogger(__name__)
 
-# ── Model config ──────────────────────────────────────────────────────────────
-MODEL_FAST      = "claude-haiku-4-5-20251001"
-MODEL_DEEP      = "claude-opus-4-6"          # Upgraded: Opus for deep decisions
+# ── Loop config ───────────────────────────────────────────────────────────────
 MAX_ITERATIONS  = 12
 
-# ── Hard risk limits (enforced by RiskGate — do not change logic here) ────────
-MAX_POSITION_PCT   = 0.20   # 20% of portfolio per position (ATR-sized down further)
+# ── Hard risk limits (the authoritative values live in RiskGate; these mirror
+#    them for prompt display + sizing). max_position_size_inr shown to the model
+#    reflects RiskGate's single-stock cap so the two never disagree. ───────────
+MAX_POSITION_PCT   = 0.20   # 20% single-stock cap — matches RiskGate.max_single_stock_pct
 MAX_OPEN_POSITIONS = 5
-MAX_DAILY_LOSS_PCT = 0.05   # 5% daily loss triggers halt
+MAX_DAILY_LOSS_PCT = 0.05   # 5% daily loss triggers HOLD-only mode
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are Arjun, a senior proprietary trader with 12 years of experience on NSE/BSE.
@@ -215,6 +216,40 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
 
         # ── get_portfolio_state ───────────────────────────────────────────────
         elif name == "get_portfolio_state":
+            from broker_manager import get_portfolio_state as bm_portfolio_state
+            pstate = bm_portfolio_state(user_id)
+
+            # Live broker: holdings already carry real avg/ltp/pnl from the broker.
+            if pstate["mode"] == "live":
+                enriched = []
+                for h in pstate["holdings"]:
+                    avg_buy   = float(h.get("avg_buy_price") or 0)
+                    qty       = float(h.get("quantity") or 0)
+                    cur_price = float(h.get("current_price") or avg_buy)
+                    enriched.append({
+                        "ticker":           h.get("ticker"),
+                        "quantity":         qty,
+                        "avg_buy_price":    avg_buy,
+                        "current_price":    cur_price,
+                        "total_investment": h.get("total_investment"),
+                        "unrealised_pnl":   round((cur_price - avg_buy) * qty, 2),
+                        "pnl_pct":          round((cur_price / avg_buy - 1) * 100, 2) if avg_buy > 0 else 0,
+                        "days_held":        None,          # not tracked by broker holdings
+                        "should_review":    False,
+                    })
+                avail = float(pstate["balance"])
+                total = float(pstate["total_value"])
+                return {
+                    "mode":                  "live",
+                    "broker":                pstate["broker"],
+                    "available_capital":     round(avail, 2),
+                    "total_portfolio_value": round(total, 2),
+                    "open_positions":        len(enriched),
+                    "max_position_size_inr": round(total * MAX_POSITION_PCT, 2),
+                    "positions":             enriched,
+                }
+
+            # Paper mode: enrich with live prices + position ages as before.
             from trading_manager import get_trading_balance, get_trading_portfolio, get_position_ages
             from stock_data import get_bulk_prices
             balance  = get_trading_balance(user_id) or {}
@@ -254,6 +289,7 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             total        = avail + market_value
 
             return {
+                "mode":                  "paper",
                 "available_capital":     round(avail, 2),
                 "total_portfolio_value": round(total, 2),
                 "open_positions":        len(holdings),
@@ -268,6 +304,21 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             from news_monitor import fetch_stock_news
             from signal_engine import score_stock, format_scores_for_prompt
 
+            # 15-minute cache — avoid re-fetching the same ticker multiple times
+            # per session and across concurrent user sessions
+            import hashlib, json as _json
+            _cache_key = f"stockeye:analysis:{ticker}"
+            _cached_raw = None
+            try:
+                from cache import _get_redis
+                _r = _get_redis()
+                if _r:
+                    _cached_raw = _r.get(_cache_key)
+            except Exception:
+                pass
+            if _cached_raw:
+                return _json.loads(_cached_raw)
+
             price_data = get_stock_price(ticker) or {}
             tech       = calculate_technical_indicators(ticker, period="3mo") or {}
             articles   = fetch_stock_news(ticker, days=3, max_articles=5)
@@ -278,20 +329,18 @@ def _execute_tool(name: str, inputs: dict, user_id: str, session_id: str,
             signal_result = score_stock(ticker)
             signal_block  = format_scores_for_prompt(signal_result)
 
-            # Deep analysis: Opus + extended thinking
-            opus_reasoning = ""
+            # Deep analysis: use the deep model tier via the model-agnostic layer.
+            deep_reasoning = ""
             try:
-                import anthropic as _anthropic
-                _client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
                 analysis_prompt = f"""You are a senior NSE/BSE trader doing a deep analysis before committing capital.
 
 {signal_block}
 
 Price: ₹{price_data.get('current_price', 'N/A')}
 Day change: {price_data.get('day_change_pct', 'N/A')}%
-RSI: {tech.get('rsi', 'N/A')} | MACD: {tech.get('macd_direction', 'N/A')}
+RSI: {tech.get('rsi', 'N/A')} | MACD: {tech.get('macd', 'N/A')} (signal {tech.get('macd_signal', 'N/A')})
 SMA-20: {tech.get('sma_20', 'N/A')} | SMA-50: {tech.get('sma_50', 'N/A')}
-Bollinger: {tech.get('bollinger_bands', {})}
+Bollinger: upper {tech.get('bb_upper', 'N/A')} / mid {tech.get('bb_middle', 'N/A')} / lower {tech.get('bb_lower', 'N/A')}
 News: {pos} positive, {neg} negative articles (last 3 days)
 
 Answer these 4 questions:
@@ -302,39 +351,46 @@ Answer these 4 questions:
 
 Be skeptical. A great setup missed is better than a bad trade taken."""
 
-                thinking_resp = _client.messages.create(
-                    model     = MODEL_DEEP,
-                    max_tokens= 12000,
-                    thinking  = {"type": "enabled", "budget_tokens": 8000},
-                    messages  = [{"role": "user", "content": analysis_prompt}],
-                )
-                for blk in thinking_resp.content:
-                    if blk.type == "text":
-                        opus_reasoning = blk.text
-                        break
+                import llm_client
+                deep_reasoning = llm_client.generate_text(
+                    prompt=analysis_prompt, deep=True, temperature=0.2, max_tokens=1500,
+                ) or "(Deep analysis unavailable)"
             except Exception as _e:
-                logger.warning(f"[AutoTrader] Opus extended thinking failed for {ticker}: {_e}")
-                opus_reasoning = "(Extended analysis unavailable)"
+                logger.warning(f"[AutoTrader] Deep analysis failed for {ticker}: {_e}")
+                deep_reasoning = "(Deep analysis unavailable)"
 
-            return {
+            _result = {
                 "ticker":            ticker,
                 "current_price":     price_data.get("current_price"),
                 "day_change_pct":    price_data.get("day_change_pct"),
                 "volume_ratio":      tech.get("volume_ratio"),
                 "rsi":               tech.get("rsi"),
-                "macd_direction":    tech.get("macd_direction"),
+                "macd":              tech.get("macd"),
+                "macd_signal":       tech.get("macd_signal"),
                 "sma_20":            tech.get("sma_20"),
                 "sma_50":            tech.get("sma_50"),
-                "bollinger":         tech.get("bollinger_bands", {}),
+                "bollinger":         {"upper": tech.get("bb_upper"),
+                                      "middle": tech.get("bb_middle"),
+                                      "lower": tech.get("bb_lower")},
                 "news_positive":     pos,
                 "news_negative":     neg,
-                "tech_signal":       tech.get("signal"),
+                "tech_signals":      tech.get("signals"),
                 "composite_score":   signal_result["composite_score"],
                 "signal_scores":     signal_result["scores"],
                 "market_data":       signal_result["market_data"],
                 "data_quality":      signal_result["data_quality"],
-                "opus_analysis":     opus_reasoning,
+                "deep_analysis":     deep_reasoning,
             }
+            # Cache for 15 minutes so repeated calls (same ticker, same session)
+            # and concurrent user sessions don't re-hit the API
+            try:
+                from cache import _get_redis
+                _r = _get_redis()
+                if _r:
+                    _r.setex(_cache_key, 900, _json.dumps(_result, default=str))
+            except Exception:
+                pass
+            return _result
 
         # ── calculate_position_size ───────────────────────────────────────────
         elif name == "calculate_position_size":
@@ -369,44 +425,63 @@ Be skeptical. A great setup missed is better than a bad trade taken."""
 
         # ── execute_trade ─────────────────────────────────────────────────────
         elif name == "execute_trade":
-            from trading_manager import (
-                get_trading_portfolio, get_trading_balance, place_order
-            )
+            from trading_manager import place_order
             from risk_gate import risk_gate
             from signal_engine import score_stock
+            from broker_manager import get_portfolio_state
 
-            holdings     = get_trading_portfolio(user_id) or []
-            held_tickers = {h["ticker"] for h in holdings}
-            ticker_check = inputs.get("ticker", "").upper()
-            side_check   = inputs.get("side", "BUY")
+            # Unified view: real broker holdings/cash when live, paper otherwise.
+            pstate        = get_portfolio_state(user_id)
+            live_mode     = pstate["mode"] == "live"
+            holdings      = pstate["holdings"]
+            held_tickers  = {h["ticker"] for h in holdings}
+            avail_balance = float(pstate["balance"] or 0)
+
+            # Normalize the ticker ONCE — strip exchange suffixes so live orders
+            # send a clean NSE tradingsymbol to the broker (Kite rejects TCS.NS).
+            ticker     = inputs.get("ticker", "").upper().replace(".NS", "").replace(".BO", "")
+            side       = inputs.get("side", "BUY").upper()
+            quantity   = int(inputs.get("quantity") or 1)
+            order_type = "MARKET"  # paper trading always executes immediately
+            stop_loss  = inputs.get("stop_loss")
+
+            if not ticker:
+                return {"error": "ticker is required"}
 
             # No-rebuy guard
-            if side_check == "BUY" and ticker_check in held_tickers:
-                return {"error": f"Already holding {ticker_check} — sell first or pick a different stock"}
+            if side == "BUY" and ticker in held_tickers:
+                return {"error": f"Already holding {ticker} — sell first or pick a different stock"}
 
-            balance  = get_trading_balance(user_id) or {}
-            invested = sum(float(h.get("total_investment") or 0) for h in holdings)
-            total    = float(balance.get("balance") or 100_000) + invested
+            # Resolve the execution price BEFORE any risk check. RiskGate's rupee
+            # rules (single-stock %, portfolio heat, capital) are meaningless at
+            # price 0, so we must never run them on an unpriced order.
+            price = float(inputs.get("price") or 0)
+            if not price:
+                from stock_data import get_stock_price
+                p = get_stock_price(ticker) or {}
+                price = float(p.get("current_price") or 0)
+            if not price:
+                return {"error": f"Could not determine price for {ticker}"}
 
-            # RiskGate check (BUY only)
-            if side_check == "BUY":
-                entry_price = float(inputs.get("price") or 0)
-                quantity    = int(inputs.get("quantity") or 1)
+            # RiskGate check (BUY only) — now with a real, non-zero entry price
+            if side == "BUY":
                 portfolio_ctx = risk_gate.build_portfolio_context(user_id)
 
                 # Fetch market data for risk checks
-                signal_result = score_stock(ticker_check)
-                market_data   = {
+                signal_result  = score_stock(ticker)
+                from stock_data import get_liquidity_and_earnings
+                liquidity      = get_liquidity_and_earnings(ticker)
+                market_data    = {
                     **signal_result.get("market_data", {}),
-                    "avg_daily_volume_cr": None,   # TODO: add liquidity data
-                    "days_to_earnings":    None,   # TODO: add earnings calendar
+                    "avg_daily_volume_cr": liquidity.get("avg_daily_volume_cr"),
+                    "days_to_earnings":    liquidity.get("days_to_earnings"),
                 }
 
                 gate_passed, gate_failures = risk_gate.check_all(
-                    ticker      = ticker_check,
-                    side        = side_check,
+                    ticker      = ticker,
+                    side        = side,
                     quantity    = quantity,
-                    entry_price = entry_price,
+                    entry_price = price,
                     portfolio   = portfolio_ctx,
                     market_data = market_data,
                     confidence  = float(inputs.get("confidence", 0.75)),
@@ -418,31 +493,55 @@ Be skeptical. A great setup missed is better than a bad trade taken."""
                         "rule_failures": gate_failures,
                     }
 
-            ticker     = inputs.get("ticker", "").upper()
-            side       = inputs.get("side", "BUY")
-            quantity   = int(inputs.get("quantity") or 1)
-            order_type = "MARKET"  # paper trading always executes immediately
-            price      = float(inputs.get("price") or 0)
-            stop_loss  = inputs.get("stop_loss")
-
-            # Fetch live price if not provided
-            if not price:
-                from stock_data import get_stock_price
-                p = get_stock_price(ticker) or {}
-                price = float(p.get("current_price") or 0)
-            if not price:
-                return {"error": f"Could not determine price for {ticker}"}
-
-            # Capital check for buys
-            avail = float(balance.get("balance") or 0)
-            if side == "BUY" and price * quantity > avail:
+            # Capital check for buys (broker cash when live, paper cash otherwise)
+            if side == "BUY" and price * quantity > avail_balance:
                 return {
                     "error": (
                         f"Insufficient capital: need ₹{price*quantity:,.0f}, "
-                        f"available ₹{avail:,.0f}"
+                        f"available ₹{avail_balance:,.0f}"
                     )
                 }
 
+            # ── LIVE: propose for approval instead of executing ──────────────────
+            # Nothing reaches the broker here. The order is queued and only placed
+            # once the user approves it (web or Telegram).
+            if live_mode:
+                from proposal_store import check_rupee_caps, create_proposal
+                ok, reason = check_rupee_caps(user_id, side, price * quantity)
+                if not ok:
+                    return {"error": reason, "cap_block": True}
+                proposal_id = create_proposal(
+                    user_id, ticker=ticker, side=side, quantity=quantity,
+                    order_type=order_type, price=price,
+                    stop_loss=float(stop_loss) if stop_loss else None,
+                    confidence=float(inputs.get("confidence", 0.75)),
+                    reasoning=inputs.get("reasoning", ""),
+                    risk_gate_result={"passed": True}, session_id=session_id,
+                )
+                try:
+                    from telegram_notify import notify_proposal
+                    notify_proposal(user_id, proposal_id, ticker, side, quantity, price,
+                                    inputs.get("reasoning", ""))
+                except Exception:
+                    pass
+                logger.info(
+                    f"[AutoTrader:{session_id}] PROPOSED {side} {quantity}x{ticker} "
+                    f"@ ₹{price:.2f} (proposal {proposal_id}, awaiting approval)"
+                )
+                return {
+                    "proposed":        True,
+                    "proposal_id":     proposal_id,
+                    "status":          "AWAITING_APPROVAL",
+                    "ticker":          ticker,
+                    "side":            side,
+                    "quantity":        quantity,
+                    "execution_price": round(price, 2),
+                    "total_value":     round(quantity * price, 2),
+                    "reasoning":       inputs.get("reasoning", ""),
+                    "note": "Live order requires your approval (web or Telegram) before it reaches the broker.",
+                }
+
+            # ── PAPER: execute immediately (unchanged behavior) ──────────────────
             order_id = place_order(
                 user_id    = user_id,
                 ticker     = ticker,
@@ -487,8 +586,9 @@ Be skeptical. A great setup missed is better than a bad trade taken."""
 
             # Capture signal scores at time of execution for track record
             try:
-                trade_signal_scores = score_stock(ticker).get("scores", {})
-                composite_at_entry  = score_stock(ticker).get("composite_score")
+                _signal = score_stock(ticker)
+                trade_signal_scores = _signal.get("scores", {})
+                composite_at_entry  = _signal.get("composite_score")
             except Exception:
                 trade_signal_scores = {}
                 composite_at_entry  = None
@@ -610,7 +710,7 @@ def run_trading_session(user_id: str, tickers: list | None = None,
     Returns a structured session summary dict, {"already_running": True} if
     another session is active, or None on failure.
     """
-    import anthropic
+    import llm_client
     from trading_manager import get_trading_balance
 
     if not _acquire_session_lock(user_id):
@@ -620,220 +720,148 @@ def run_trading_session(user_id: str, tickers: list | None = None,
     session_id = f"trade-{user_id[:8]}-{datetime.now().strftime('%H%M%S')}"
     _active_sessions[user_id] = {"session_id": session_id, "status": "running", "user_id": user_id}
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.error("ANTHROPIC_API_KEY not set — agentic trader unavailable")
-        _release_session_lock(user_id)
-        return None
-
-    # Determine usable capital for this session
-    balance_row    = get_trading_balance(user_id) or {}
-    available      = float(balance_row.get('balance') or 0)
-    usable_capital = min(float(budget), available) if budget is not None else available
-
-    client  = anthropic.Anthropic(api_key=api_key)
-    model   = MODEL_FAST
-    trades  = []
-    session_result = None
-
-    per_slot = usable_capital / MAX_OPEN_POSITIONS if budget is not None else 0
-    budget_note = (
-        f"BUDGET FOR THIS SESSION: ₹{usable_capital:,.2f} split across up to {MAX_OPEN_POSITIONS} positions "
-        f"(≈₹{per_slot:,.0f} per stock). "
-        f"AIM TO FILL ALL {MAX_OPEN_POSITIONS} SLOTS — scan broadly and pick the best {MAX_OPEN_POSITIONS} opportunities. "
-        f"Do not stop at 1 trade if more opportunities exist. "
-        f"Your available cash is ₹{available:,.2f}. "
-    ) if budget is not None else ""
-
-    # Market regime — shapes the entire session strategy
+    # try/finally guarantees the Redis session lock is released even if the loop
+    # raises — otherwise a crash would wedge the user out for the full 900s TTL.
     try:
-        from signal_engine import get_market_regime
-        regime_data  = get_market_regime()
-        regime_block = (
-            f"MARKET REGIME: {regime_data['regime']} | "
-            f"{regime_data.get('strategy_note', '')} | "
-            f"Reasons: {'; '.join(regime_data.get('reasons', []))}"
-        )
-    except Exception:
-        regime_block = ""
+        if not llm_client.is_available():
+            logger.error("No LLM provider configured — agentic trader unavailable")
+            return None
 
-    # Shared intelligence from other modules (proactive agent, monitor alerts)
-    try:
-        from shared_context import get_context_summary
-        intel_block = get_context_summary(user_id, max_age_hours=12)
-    except Exception:
-        intel_block = ""
+        # Determine usable capital for this session
+        balance_row    = get_trading_balance(user_id) or {}
+        available      = float(balance_row.get('balance') or 0)
+        usable_capital = min(float(budget), available) if budget is not None else available
 
-    # Self-tuning: adjust sizing/criteria based on recent win rate
-    win_rate     = _compute_win_rate(user_id)
-    win_rate_note = ""
-    if win_rate is not None:
-        if win_rate < 0.4:
-            win_rate_note = (
-                f"CAUTION: recent win rate is {win_rate:.0%}. "
-                f"Raise minimum R:R to 2.0 and halve all position sizes. "
+        trades  = []
+
+        per_slot = usable_capital / MAX_OPEN_POSITIONS if budget is not None else 0
+        budget_note = (
+            f"BUDGET FOR THIS SESSION: ₹{usable_capital:,.2f} split across up to {MAX_OPEN_POSITIONS} positions "
+            f"(≈₹{per_slot:,.0f} per stock). "
+            f"AIM TO FILL ALL {MAX_OPEN_POSITIONS} SLOTS — scan broadly and pick the best {MAX_OPEN_POSITIONS} opportunities. "
+            f"Do not stop at 1 trade if more opportunities exist. "
+            f"Your available cash is ₹{available:,.2f}. "
+        ) if budget is not None else ""
+
+        # Market regime — shapes the entire session strategy
+        try:
+            from signal_engine import get_market_regime
+            regime_data  = get_market_regime()
+            regime_block = (
+                f"MARKET REGIME: {regime_data['regime']} | "
+                f"{regime_data.get('strategy_note', '')} | "
+                f"Reasons: {'; '.join(regime_data.get('reasons', []))}"
             )
-        elif win_rate > 0.7:
-            win_rate_note = (
-                f"CONFIDENCE: recent win rate is {win_rate:.0%}. Normal sizing applies. "
-            )
+        except Exception:
+            regime_block = ""
 
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                f"Run a paper trading session. Today: {date.today().isoformat()}. "
-                f"{regime_block} "
-                f"{budget_note}"
-                f"{win_rate_note}"
-                f"{intel_block}"
-                f"Follow the workflow: first check portfolio state, apply exit rules to "
-                f"open positions, then scan and execute 1-2 high-conviction new trades. "
-                f"Prioritise tickers flagged as bullish in the platform intelligence above. "
-                f"Avoid tickers flagged as bearish unless the reversal case is very clear. "
-                f"Only trade if risk/reward ≥ 1.5."
-            ),
-        }
-    ]
+        # Shared intelligence from other modules (proactive agent, monitor alerts)
+        try:
+            from shared_context import get_context_summary
+            intel_block = get_context_summary(user_id, max_age_hours=12)
+        except Exception:
+            intel_block = ""
 
-    for iteration in range(MAX_ITERATIONS):
-        # Force-submit nudge after iteration 7 to prevent stalling
-        if iteration == 7 and not session_result:
-            messages.append({
-                "role": "user",
-                "content": (
-                    "You have gathered sufficient data. "
-                    "Call submit_session_summary NOW with your final report."
-                ),
-            })
-
-        # Retry Anthropic API with backoff (handles transient 429/500/529 errors)
-        response = None
-        for api_attempt in range(3):
-            try:
-                response = client.messages.create(
-                    model      = model,
-                    max_tokens = 4096,
-                    temperature= 0.1,
-                    system     = SYSTEM_PROMPT,
-                    tools      = TRADING_TOOLS,
-                    messages   = messages,
+        # Self-tuning: adjust sizing/criteria based on recent win rate
+        win_rate     = _compute_win_rate(user_id)
+        win_rate_note = ""
+        if win_rate is not None:
+            if win_rate < 0.4:
+                win_rate_note = (
+                    f"CAUTION: recent win rate is {win_rate:.0%}. "
+                    f"Raise minimum R:R to 2.0 and halve all position sizes. "
                 )
-                break
-            except Exception as exc:
-                if api_attempt < 2:
-                    import time as _time
-                    wait = 2 ** api_attempt  # 1s, 2s
-                    logger.warning(
-                        f"[{session_id}] Claude API error (iter {iteration}, "
-                        f"attempt {api_attempt + 1}/3): {exc} — retrying in {wait}s"
-                    )
-                    _time.sleep(wait)
-                else:
-                    logger.error(f"[{session_id}] Claude API failed after 3 attempts (iter {iteration}): {exc}")
-        if response is None:
-            break
+            elif win_rate > 0.7:
+                win_rate_note = (
+                    f"CONFIDENCE: recent win rate is {win_rate:.0%}. Normal sizing applies. "
+                )
 
-        logger.debug(
-            f"[{session_id}] iter={iteration} stop={response.stop_reason} "
-            f"blocks={[b.type for b in response.content]}"
+        user_prompt = (
+            f"Run a paper trading session. Today: {date.today().isoformat()}. "
+            f"{regime_block} "
+            f"{budget_note}"
+            f"{win_rate_note}"
+            f"{intel_block}"
+            f"Follow the workflow: first check portfolio state, apply exit rules to "
+            f"open positions, then scan and execute 1-2 high-conviction new trades. "
+            f"Prioritise tickers flagged as bullish in the platform intelligence above. "
+            f"Avoid tickers flagged as bearish unless the reversal case is very clear. "
+            f"Only trade if risk/reward ≥ 1.5."
         )
-        messages.append({"role": "assistant", "content": response.content})
 
-        if response.stop_reason == "end_turn":
-            logger.warning(f"[{session_id}] end_turn at iter {iteration} without submitting")
-            break
-        if response.stop_reason != "tool_use":
-            break
-
-        tool_results = []
-        loop_done    = False
-
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-
-            name  = block.name
-            inp   = block.input
-
-            if name == "submit_session_summary":
-                session_result = dict(inp)
-                tool_results.append({
-                    "type":        "tool_result",
-                    "tool_use_id": block.id,
-                    "content":     json.dumps({"status": "session_complete"}),
-                })
-                loop_done = True
-                break
-
-            # Escalate to Sonnet for deep analysis
-            if name == "analyse_opportunity" and model == MODEL_FAST:
-                model = MODEL_DEEP
-                logger.info(f"[{session_id}] Escalated to Sonnet for analysis")
-
-            result = _execute_tool(name, inp, user_id, session_id,
-                                   user_tickers=tickers, budget=budget)
-
-            # Track executed trades
-            if name == "execute_trade" and result.get("success"):
+        # Record executed paper trades AND queued live proposals as session activity.
+        def _track(name, args, result):
+            if name == "execute_trade" and (result.get("success") or result.get("proposed")):
                 trades.append(result)
-                # Update session state in registry
                 _active_sessions[user_id]["trades"] = trades
 
-            tool_results.append({
-                "type":        "tool_result",
-                "tool_use_id": block.id,
-                "content":     json.dumps(result, default=str),
-            })
+        loop = llm_client.run_agent_loop(
+            system=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            tools=TRADING_TOOLS,
+            dispatch=lambda name, inp: _execute_tool(
+                name, inp, user_id, session_id, user_tickers=tickers, budget=budget),
+            terminal_tools={"submit_session_summary"},
+            max_iterations=MAX_ITERATIONS,
+            temperature=0.1,
+            max_tokens=4096,
+            force_terminal_at=7,
+            force_terminal_message=(
+                "You have gathered sufficient data. "
+                "Call submit_session_summary NOW with your final report."
+            ),
+            on_tool_result=_track,
+        )
 
-        messages.append({"role": "user", "content": tool_results})
+        session_result = loop.get("terminal_result")
+        model = loop.get("model")
 
-        if loop_done:
-            break
+        # Fallback summary if the model never called submit_session_summary
+        if not session_result:
+            logger.warning(f"[{session_id}] No session summary produced")
+            session_result = {
+                "trades_executed":        len(trades),
+                "opportunities_found":    0,
+                "total_capital_deployed": sum(t.get("total_value", 0) for t in trades),
+                "reasoning":              "Session ended without explicit summary.",
+                "market_conditions":      "Unknown",
+                "risk_assessment":        "N/A",
+            }
 
-    # Fallback summary if Claude never called submit_session_summary
-    if not session_result:
-        logger.warning(f"[{session_id}] No session summary produced")
-        session_result = {
-            "trades_executed":        len(trades),
-            "opportunities_found":    0,
-            "total_capital_deployed": sum(t.get("total_value", 0) for t in trades),
-            "reasoning":              "Session ended without explicit summary.",
-            "market_conditions":      "Unknown",
-            "risk_assessment":        "N/A",
+        final = {
+            "session_id":   session_id,
+            "user_id":      user_id,
+            "trades":       trades,
+            "model_used":   model,
+            "generated_at": datetime.now().isoformat(),
+            "status":       "complete",
+            **session_result,
         }
 
-    final = {
-        "session_id":   session_id,
-        "user_id":      user_id,
-        "trades":       trades,
-        "model_used":   model,
-        "generated_at": datetime.now().isoformat(),
-        "status":       "complete",
-        **session_result,
-    }
+        _active_sessions[user_id] = final
+        logger.info(
+            f"[{session_id}] Complete — {len(trades)} trade(s), "
+            f"capital_deployed=₹{session_result.get('total_capital_deployed',0):,.0f}, "
+            f"model={model}"
+        )
 
-    _active_sessions[user_id] = final
-    logger.info(
-        f"[{session_id}] Complete — {len(trades)} trade(s), "
-        f"capital_deployed=₹{session_result.get('total_capital_deployed',0):,.0f}, "
-        f"model={model}"
-    )
-
-    # Save daily snapshot so return history is always up to date after a session
-    try:
-        from trading_manager import snapshot_portfolio
-        snapshot_portfolio(user_id)
-    except Exception as snap_exc:
-        logger.warning(f"[{session_id}] Snapshot failed (non-fatal): {snap_exc}")
-
-    # Push Telegram notification (skip when caller handles its own reply, e.g. telegram_bot.py)
-    if notify:
+        # Save daily snapshot so return history is always up to date after a session
         try:
-            from telegram_notify import send_trade_summary
-            send_trade_summary(final)
-        except Exception:
-            pass
+            from trading_manager import snapshot_portfolio
+            snapshot_portfolio(user_id)
+        except Exception as snap_exc:
+            logger.warning(f"[{session_id}] Snapshot failed (non-fatal): {snap_exc}")
 
-    _release_session_lock(user_id)
-    return final
+        # Push Telegram notification (skip when caller handles its own reply)
+        if notify:
+            try:
+                from telegram_notify import send_trade_summary
+                send_trade_summary(final)
+            except Exception:
+                pass
+
+        return final
+    finally:
+        _release_session_lock(user_id)
+        if _active_sessions.get(user_id, {}).get("status") == "running":
+            _active_sessions[user_id]["status"] = "error"

@@ -73,6 +73,65 @@ def send_trade_summary(session_result: dict) -> None:
     send(msg)
 
 
+def send_with_buttons(message: str, buttons: list, chat_id: str | None = None) -> bool:
+    """Send a message with an inline keyboard. `buttons` is a list of rows,
+    each row a list of {text, callback_data} dicts."""
+    token, default_cid = _cfg()
+    cid = chat_id or default_cid
+    if not token or not cid:
+        return False
+    keyboard = [[{"text": b["text"], "callback_data": b["callback_data"]} for b in row]
+                for row in buttons]
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": cid, "text": message[:4096], "parse_mode": "HTML",
+                  "reply_markup": {"inline_keyboard": keyboard}},
+            timeout=5,
+        )
+        return resp.status_code == 200
+    except Exception as exc:
+        logger.debug(f"Telegram send_with_buttons failed (non-fatal): {exc}")
+        return False
+
+
+def notify_proposal(user_id: str, proposal_id: int, ticker: str, side: str,
+                    quantity: float, price: float, reasoning: str = "") -> None:
+    """Push an approval request with inline Approve/Reject buttons.
+
+    Single-user bot: only notify the configured owner (TELEGRAM_USER_ID)."""
+    owner = os.environ.get("TELEGRAM_USER_ID", "")
+    if owner and str(user_id) != str(owner):
+        return
+    if not proposal_id:
+        return
+    side_emoji = "🟢 BUY" if side == "BUY" else "🔴 SELL"
+    msg = (
+        f"🤝 <b>Trade proposal #{proposal_id}</b> — awaiting your approval\n\n"
+        f"{side_emoji}  <b>{ticker}</b>  {quantity}×  @ ₹{price:,.2f}\n"
+        f"💰 Value: ₹{quantity * price:,.0f}\n\n"
+        f"💬 {reasoning[:600]}\n\n"
+        f"<i>Tap below — this places a REAL order on Zerodha.</i>"
+    )
+    send_with_buttons(msg, [[
+        {"text": "✅ Approve", "callback_data": f"approve:{proposal_id}"},
+        {"text": "❌ Reject",  "callback_data": f"reject:{proposal_id}"},
+    ]])
+
+
+def notify_relink(user_id: str) -> None:
+    """Owner-scoped nudge that the daily Zerodha token expired and needs re-linking."""
+    owner = os.environ.get("TELEGRAM_USER_ID", "")
+    if owner and str(user_id) != str(owner):
+        return
+    send(
+        "🔑 <b>Zerodha session expired</b>\n\n"
+        "Your daily Kite token has lapsed, so live trading is paused. "
+        "Open StockEye → Auto Trading → <b>Re-link Zerodha Kite</b> to resume.\n\n"
+        "<i>Until then, the agent only proposes — no orders can be placed.</i>"
+    )
+
+
 def send_price_alert(ticker: str, alert_type: str, price: float, note: str = "") -> None:
     send(
         f"🔔 <b>Price Alert — {ticker}</b>\n"

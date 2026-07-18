@@ -49,6 +49,10 @@ def _get_pg_pool():
                 password=unquote(parsed.password or ''),
                 dbname=(parsed.path or '/postgres').lstrip('/'),
                 sslmode='require',
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
             )
             logger.info("PostgreSQL connection pool initialised (2–20 connections)")
         except Exception as e:
@@ -198,20 +202,41 @@ def get_db_connection():
                 conn.commit()
             except Exception as e:
                 logger.error(f"Postgres tx failed: {e}")
-                conn.rollback(); raise
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
             finally:
-                conn.close()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
         else:
+            import psycopg2
             raw = pool.getconn()
             conn = _PgConn(raw)
+            broken = False
             try:
                 yield conn
                 conn.commit()
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                logger.error(f"Postgres tx failed: {e}")
+                broken = True
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
             except Exception as e:
                 logger.error(f"Postgres tx failed: {e}")
-                conn.rollback(); raise
+                try:
+                    conn.rollback()
+                except Exception:
+                    broken = True
+                raise
             finally:
-                pool.putconn(raw)
+                pool.putconn(raw, close=broken)
 
     elif DB_TYPE == 'sqlitecloud':
         try:

@@ -325,19 +325,26 @@ class RiskGate:
         Returns portfolio dict matching the schema expected by check_all().
         """
         try:
-            from trading_manager import get_trading_balance, get_trading_portfolio
+            from broker_manager import get_portfolio_state
             from stock_data import get_bulk_prices
             from db import get_db_connection
 
-            balance_row = get_trading_balance(user_id) or {}
-            holdings    = get_trading_portfolio(user_id) or []
-            prices      = get_bulk_prices([h["ticker"] for h in holdings]) if holdings else {}
+            # Unified seam: real broker holdings when live, paper portfolio otherwise.
+            pstate   = get_portfolio_state(user_id)
+            holdings = pstate["holdings"]
+            balance  = float(pstate["balance"])
 
-            balance     = float(balance_row.get("balance") or 0)
-            market_val  = sum(
-                float(h["quantity"]) * float(prices.get(h["ticker"]) or h["avg_buy_price"])
-                for h in holdings
-            )
+            if pstate["mode"] == "live":
+                # Broker holdings already carry current_value / current_price.
+                def _hval(h):
+                    return float(h.get("current_value") or 0)
+                prices = {}
+            else:
+                prices = get_bulk_prices([h["ticker"] for h in holdings]) if holdings else {}
+                def _hval(h):
+                    return float(h["quantity"]) * float(prices.get(h["ticker"]) or h["avg_buy_price"])
+
+            market_val  = sum(_hval(h) for h in holdings)
             total_value = balance + market_val
             heat        = market_val / total_value if total_value else 0
 
@@ -392,9 +399,7 @@ class RiskGate:
                 pass
 
             open_positions = [
-                {"ticker": h["ticker"], "value": float(h["quantity"]) * float(
-                    prices.get(h["ticker"]) or h["avg_buy_price"]
-                )}
+                {"ticker": h["ticker"], "value": _hval(h)}
                 for h in holdings
             ]
 

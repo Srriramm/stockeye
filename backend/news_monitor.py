@@ -641,57 +641,27 @@ def _ai_sentiment_batch(headlines: list[str]) -> list[str]:
     )
     user_prompt = f"Classify the sentiment of each headline:\n{numbered}"
 
-    # ── Try OpenAI first ────────────────────────────────────────────
-    if _openai_module and _OPENAI_API_KEY:
-        try:
-            client = _openai_module.OpenAI(api_key=_OPENAI_API_KEY)
-            resp = client.chat.completions.create(
-                model='gpt-4o-mini',
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user',   'content': user_prompt},
-                ],
-                max_tokens=len(headlines) * 12,
-                temperature=0,
+    # ── Model-agnostic single call (Gemini/Anthropic/OpenAI) ─────────
+    try:
+        import llm_client
+        if llm_client.is_available():
+            labels = llm_client.generate_json(
+                system=system_prompt, prompt=user_prompt,
+                temperature=0, max_tokens=max(64, len(headlines) * 12),
             )
-            raw = resp.choices[0].message.content.strip()
-            # Strip markdown code fences if present (gpt-4o-mini sometimes wraps in ```json ... ```)
-            raw = re.sub(r'^```[a-z]*\s*', '', raw, flags=re.IGNORECASE)
-            raw = re.sub(r'\s*```$', '', raw)
-            labels = json.loads(raw)
             if isinstance(labels, list) and len(labels) == len(headlines):
                 cleaned = []
                 for lbl in labels:
                     s = str(lbl).lower().strip()
                     cleaned.append(s if s in ('positive', 'negative', 'neutral') else 'neutral')
-                logger.info(f"AI sentiment (OpenAI): classified {len(headlines)} headlines")
+                logger.info(f"AI sentiment ({llm_client.default_provider()}): classified {len(headlines)} headlines")
                 return cleaned
-        except Exception as e:
-            logger.warning(f"OpenAI batch sentiment failed: {e}")
-
-    # ── Try Anthropic as fallback ────────────────────────────────────
-    if _anthropic_module and _ANTHROPIC_API_KEY:
-        try:
-            client = _anthropic_module.Anthropic(api_key=_ANTHROPIC_API_KEY)
-            msg = client.messages.create(
-                model='claude-haiku-20240307',
-                max_tokens=len(headlines) * 12,
-                messages=[{'role': 'user', 'content': f"{system_prompt}\n\n{user_prompt}"}],
-            )
-            raw = msg.content[0].text.strip()
-            labels = json.loads(raw)
-            if isinstance(labels, list) and len(labels) == len(headlines):
-                cleaned = []
-                for lbl in labels:
-                    s = str(lbl).lower().strip()
-                    cleaned.append(s if s in ('positive', 'negative', 'neutral') else 'neutral')
-                logger.info(f"AI sentiment (Anthropic): classified {len(headlines)} headlines")
-                return cleaned
-        except Exception as e:
-            logger.warning(f"Anthropic batch sentiment failed: {e}")
+            logger.warning("AI sentiment: label count mismatch — using rule-based fallback")
+    except Exception as e:
+        logger.warning(f"AI batch sentiment failed: {e}")
 
     # ── Final rule-based fallback ────────────────────────────────────
-    logger.info("Falling back to rule-based sentiment (no AI key available)")
+    logger.info("Falling back to rule-based sentiment (no AI available)")
     return [_quick_sentiment(h) for h in headlines]
 
 

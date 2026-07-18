@@ -8,7 +8,7 @@ import sys
 import json
 import logging
 from datetime import datetime
-from flask import Flask, request, jsonify, session, redirect
+from flask import Flask, request, jsonify, session, redirect, g
 
 import io
 from flask_cors import CORS
@@ -183,6 +183,7 @@ def enforce_beta_access():
 
     try:
         user_id = verify_token(auth_header[7:].strip())  # Redis-cached, fast
+        g.user_id = user_id  # per-user rate-limit key + structured logging
     except Exception:
         return None  # invalid token — @require_auth handles the 401
 
@@ -1812,14 +1813,12 @@ def weekly_portfolio_review(user_id):
             "fii_net_cr":      fii_dii.get("fii_net_cr"),
         }
 
-        # Ask Claude Haiku for a written review
-        import anthropic as _ant
-        ant_key = os.getenv("ANTHROPIC_API_KEY", "")
+        # Ask the LLM layer for a written review (model-agnostic)
+        import llm_client
         narrative = None
 
-        if ant_key and not ant_key.startswith("sk-ant-..."):
+        if llm_client.is_available():
             try:
-                client = _ant.Anthropic(api_key=ant_key)
                 prompt = (
                     f"You are a portfolio review assistant for an Indian equity paper trading account.\n\n"
                     f"Weekly snapshot:\n{_json.dumps(summary_data, indent=2)}\n\n"
@@ -1829,12 +1828,9 @@ def weekly_portfolio_review(user_id):
                     f"3. NEXT WEEK FOCUS (2-3 specific actionable suggestions)\n\n"
                     f"Keep it sharp, data-driven, and under 200 words total. No fluff."
                 )
-                resp = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=400,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                text = resp.content[0].text.strip()
+                text = (llm_client.generate_text(prompt=prompt, max_tokens=400) or "").strip()
+                if not text:
+                    raise ValueError("empty LLM response")
                 # Parse sections
                 sections = {}
                 current = None
@@ -2351,10 +2347,15 @@ def get_screener_sectors():
 
 
 @app.route('/api/screener/natural', methods=['POST'])
-def natural_language_screener():
+@require_auth
+@limiter.limit("20 per hour")
+def natural_language_screener(user_id):
     """
-    Parse a natural language query into screener filters using GPT-4/Claude,
+    Parse a natural language query into screener filters using the LLM layer,
     then run the existing screen_stocks() function.
+
+    Requires auth + rate-limited: this endpoint calls a paid LLM, so it must not
+    be publicly abusable.
 
     Body: { "query": "profitable IT stocks under 2000 with RSI below 40" }
     """
@@ -2414,56 +2415,18 @@ def _parse_nl_query_to_filters(query: str):
         f"JSON schema:\n{FILTER_SCHEMA}"
     )
 
-    import openai as _oai
-    import anthropic as _ant
-
-    openai_key = os.getenv('OPENAI_API_KEY', '')
-    anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
-
-    raw = None
-
-    # Try OpenAI first
-    if openai_key and not openai_key.startswith('sk-proj-...'):
-        try:
-            client = _oai.OpenAI(api_key=openai_key)
-            resp = client.chat.completions.create(
-                model='gpt-4o-mini',
-                messages=[
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': query},
-                ],
-                max_tokens=400,
-                temperature=0,
-                response_format={'type': 'json_object'},
-            )
-            raw = resp.choices[0].message.content
-        except Exception as e:
-            logger.warning(f"NL screener OpenAI parse failed: {e}")
-
-    # Fallback to Anthropic
-    if raw is None and anthropic_key and not anthropic_key.startswith('sk-ant-...'):
-        try:
-            client = _ant.Anthropic(api_key=anthropic_key)
-            resp = client.messages.create(
-                model='claude-haiku-20240307',
-                max_tokens=400,
-                system=system_prompt,
-                messages=[{'role': 'user', 'content': query}],
-            )
-            raw = resp.content[0].text
-        except Exception as e:
-            logger.warning(f"NL screener Anthropic parse failed: {e}")
-
-    # Parse the JSON
-    if raw:
-        try:
-            parsed = json.loads(raw)
+    # Model-agnostic parse (Gemini/Anthropic/OpenAI, per LLM_PROVIDER)
+    try:
+        import llm_client
+        parsed = llm_client.generate_json(
+            system=system_prompt, prompt=query, temperature=0, max_tokens=400,
+        )
+        if isinstance(parsed, dict):
             description = parsed.pop('description', f'Filters from: "{query}"')
-            # Strip null values
             filters = {k: v for k, v in parsed.items() if v is not None}
             return filters, description
-        except Exception as e:
-            logger.warning(f"NL screener JSON parse failed: {e}")
+    except Exception as e:
+        logger.warning(f"NL screener LLM parse failed: {e}")
 
     # Rule-based fallback when AI is unavailable
     filters, description = _rule_based_parse(query)
@@ -2989,9 +2952,11 @@ def get_active_trading_session(user_id):
 @app.route('/api/auto-trading/broker/status', methods=['GET'])
 @require_auth
 def get_broker_status(user_id):
-    """Return current broker connection status."""
-    from broker_manager import get_broker
-    return jsonify(get_broker().get_status())
+    """Return this user's broker connection status (live/paper, needs_relink)."""
+    from broker_manager import get_broker, get_broker_settings
+    status = get_broker(user_id).get_status()
+    status['settings'] = get_broker_settings(user_id)
+    return jsonify(status)
 
 
 @app.route('/api/auto-trading/broker/login-url', methods=['GET'])
@@ -2999,7 +2964,7 @@ def get_broker_status(user_id):
 def get_broker_login_url(user_id):
     """Get Zerodha Kite OAuth login URL (only when ZERODHA_API_KEY is set)."""
     from broker_manager import get_broker
-    broker = get_broker()
+    broker = get_broker(user_id)
     url = broker.get_login_url()
     if not url:
         return jsonify({'error': 'No live broker configured. Set ZERODHA_API_KEY to enable.'}), 400
@@ -3008,15 +2973,98 @@ def get_broker_login_url(user_id):
 
 @app.route('/api/auto-trading/broker/callback', methods=['GET'])
 def broker_oauth_callback():
-    """OAuth callback from Zerodha Kite after user login."""
+    """OAuth landing from Zerodha Kite.
+
+    Kite cannot carry our user_id through its redirect, and this is an
+    unauthenticated top-level navigation, so we can't complete the login here.
+    Instead we hand the request_token back to the authenticated frontend, which
+    calls POST /broker/connect to finish the link for the logged-in user.
+    """
     request_token = request.args.get('request_token')
     if not request_token:
-        return jsonify({'error': 'Missing request_token in callback'}), 400
-    from broker_manager import get_broker
-    success = get_broker().complete_login(request_token)
-    if success:
-        return redirect('/?broker=connected')
-    return jsonify({'error': 'Broker authentication failed'}), 500
+        return redirect('/?broker=error')
+    return redirect(f'/?broker_request_token={request_token}')
+
+
+@app.route('/api/auto-trading/broker/connect', methods=['POST'])
+@require_auth
+def broker_connect(user_id):
+    """Finish the broker link for the authenticated user using the request_token."""
+    data = request.get_json(silent=True) or {}
+    request_token = data.get('request_token')
+    if not request_token:
+        return jsonify({'error': 'Missing request_token'}), 400
+    from broker_manager import get_broker, reset_broker
+    reset_broker(user_id)                       # rebuild a clean per-user instance
+    success = get_broker(user_id).complete_login(request_token)
+    if not success:
+        return jsonify({'error': 'Broker authentication failed'}), 500
+    log_event(user_id, 'broker.connect', entity_type='broker', details={'broker': 'zerodha'})
+    return jsonify(get_broker(user_id).get_status())
+
+
+@app.route('/api/auto-trading/broker/disconnect', methods=['POST'])
+@require_auth
+def broker_disconnect(user_id):
+    """Revoke the stored broker token for this user."""
+    from broker_manager import clear_broker_token, reset_broker
+    clear_broker_token(user_id, 'zerodha')
+    reset_broker(user_id)
+    log_event(user_id, 'broker.disconnect', entity_type='broker', details={'broker': 'zerodha'})
+    return jsonify({'status': 'disconnected'})
+
+
+@app.route('/api/auto-trading/broker/settings', methods=['GET', 'PUT'])
+@require_auth
+def broker_settings_route(user_id):
+    """Read / update the live-trading kill-switch and rupee caps."""
+    from broker_manager import get_broker_settings, save_broker_settings
+    if request.method == 'GET':
+        return jsonify(get_broker_settings(user_id))
+    updates = request.get_json(silent=True) or {}
+    saved = save_broker_settings(user_id, updates)
+    log_event(user_id, 'broker.settings_update', entity_type='broker', details=updates)
+    return jsonify(saved)
+
+
+@app.route('/api/auto-trading/live-portfolio', methods=['GET'])
+@require_auth
+def get_live_portfolio(user_id):
+    """Unified portfolio: REAL broker holdings/balance when live, else paper."""
+    from broker_manager import get_portfolio_state
+    return jsonify(get_portfolio_state(user_id))
+
+
+# ── Approval-gated live order proposals ────────────────────────────────────────
+@app.route('/api/auto-trading/proposals', methods=['GET'])
+@require_auth
+def list_trade_proposals(user_id):
+    """List the user's order proposals (default: pending)."""
+    from proposal_store import list_proposals, expire_stale_proposals
+    expire_stale_proposals()
+    status = request.args.get('status', 'PENDING')
+    if status.lower() == 'all':
+        status = None
+    return jsonify({'proposals': list_proposals(user_id, status=status)})
+
+
+@app.route('/api/auto-trading/proposals/<int:proposal_id>/approve', methods=['POST'])
+@require_auth
+def approve_trade_proposal(user_id, proposal_id):
+    """Approve a proposal → place the real order and reconcile the fill."""
+    from proposal_store import approve_proposal
+    log_event(user_id, 'proposal.approve', entity_type='proposed_order', entity_id=proposal_id)
+    result = approve_proposal(proposal_id, user_id)
+    return jsonify(result), (200 if not result.get('error') else 400)
+
+
+@app.route('/api/auto-trading/proposals/<int:proposal_id>/reject', methods=['POST'])
+@require_auth
+def reject_trade_proposal(user_id, proposal_id):
+    """Reject a pending proposal — nothing is sent to the broker."""
+    from proposal_store import reject_proposal
+    result = reject_proposal(proposal_id, user_id)
+    return jsonify(result), (200 if not result.get('error') else 400)
 
 
 # ═══════════════════════════════════════════════════════════════

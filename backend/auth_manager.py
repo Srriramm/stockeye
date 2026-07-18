@@ -12,9 +12,10 @@ import base64
 import hashlib
 import json as _json
 import logging
+import time
 import requests as _requests
 from functools import wraps
-from flask import request, jsonify
+from flask import request, jsonify, g
 
 logger = logging.getLogger(__name__)
 
@@ -27,21 +28,35 @@ _AUTH_KEY = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
 
 # Redis client for token caching (lazily initialized)
 _redis_client = None
+_redis_unavailable_until = 0.0   # epoch seconds; 0 means "never failed yet"
+_REDIS_RETRY_INTERVAL = 60       # seconds before retrying after a failure
 
 def _get_redis():
-    """Return a Redis client, or None if Redis is unavailable."""
-    global _redis_client
-    if _redis_client is None:
-        redis_url = os.getenv('REDIS_URL')
-        if redis_url:
-            try:
-                import redis
-                _redis_client = redis.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
-                _redis_client.ping()
-            except Exception as e:
-                logger.warning(f"Redis unavailable for token cache: {e}")
-                _redis_client = None
-    return _redis_client
+    """Return a Redis client, or None if Redis is unavailable.
+
+    Uses a 60-second circuit-breaker so a missing Redis server doesn't spam
+    the logs or add latency to every auth check.
+    """
+    global _redis_client, _redis_unavailable_until
+    if _redis_client is not None:
+        return _redis_client
+    now = time.monotonic()
+    if now < _redis_unavailable_until:
+        return None   # still in cooldown — skip silently
+    redis_url = os.getenv('REDIS_URL')
+    if not redis_url:
+        return None
+    try:
+        import redis
+        client = redis.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
+        client.ping()
+        _redis_client = client
+        _redis_unavailable_until = 0.0
+        return _redis_client
+    except Exception as e:
+        logger.warning(f"Redis unavailable for token cache: {e}")
+        _redis_unavailable_until = now + _REDIS_RETRY_INTERVAL
+        return None
 
 
 def verify_token(access_token: str) -> str:
@@ -119,6 +134,8 @@ def require_auth(f):
         except Exception as e:
             logger.warning(f"Auth failed: {e}")
             return jsonify({'error': 'Unauthorized — invalid or expired token'}), 401
+        # Expose user_id for per-user rate limiting + structured logging.
+        g.user_id = user_id
         return f(user_id, *args, **kwargs)
     return decorated
 
@@ -138,6 +155,8 @@ def optional_auth(f):
                 user_id = verify_token(auth_header[7:].strip())
             except Exception:
                 pass
+        if user_id:
+            g.user_id = user_id
         return f(user_id, *args, **kwargs)
     return decorated
 

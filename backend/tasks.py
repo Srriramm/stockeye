@@ -84,6 +84,14 @@ celery_app.conf.update(
             'task': 'tasks.run_auto_session_all_users',
             'schedule': crontab(hour=15, minute=30),  # pre-close IST
         },
+        'expire-proposals': {
+            'task': 'tasks.expire_proposals',
+            'schedule': 300.0,      # every 5 min — lapse stale approval requests
+        },
+        'reconcile-live-orders': {
+            'task': 'tasks.reconcile_live_orders',
+            'schedule': 600.0,      # every 10 min — finalize async broker fills
+        },
     },
 )
 
@@ -152,16 +160,67 @@ def run_proactive_evening(self):
 def run_auto_session_all_users(self):
     """Autonomous trading session for all funded accounts — 9:15 AM and 3:30 PM IST."""
     try:
+        from datetime import datetime
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(ist)
+        if now.weekday() >= 5:  # Saturday / Sunday
+            logger.info("Auto-session skipped — weekend")
+            return
+        market_open  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        if now < market_open or now > market_close:
+            logger.info(f"Auto-session skipped — outside market hours ({now.strftime('%H:%M')} IST)")
+            return
+
+        # Require Redis for reliable per-user session locking.
+        # Without it, concurrent Celery workers can double-run sessions for the
+        # same user. Skip gracefully rather than trade with degraded safety.
+        try:
+            import redis as _redis
+            import os as _os
+            _r = _redis.from_url(_os.environ.get('REDIS_URL', REDIS_URL),
+                                 socket_connect_timeout=2, socket_timeout=2)
+            _r.ping()
+        except Exception:
+            logger.warning("Auto-session skipped — Redis unavailable (session lock requires Redis)")
+            return
+
         from db import get_db_connection
         from agentic_trader import run_trading_session
+        uids = []
         with get_db_connection() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT user_id FROM trading_balance WHERE balance > 0"
             ).fetchall()
-        logger.info(f"Auto-session starting for {len(rows)} user(s)")
-        for row in rows:
-            uid = row['user_id']
+            uids = [r['user_id'] for r in rows]
+            # Also include users with a linked live broker (they may hold real funds
+            # with zero paper balance).
             try:
+                broker_rows = conn.execute(
+                    "SELECT DISTINCT user_id FROM broker_tokens WHERE status = 'connected'"
+                ).fetchall()
+                for br in broker_rows:
+                    if br['user_id'] not in uids:
+                        uids.append(br['user_id'])
+            except Exception:
+                pass   # broker_tokens table may not exist on older deployments
+        logger.info(f"Auto-session starting for {len(uids)} user(s)")
+        for uid in uids:
+            try:
+                # If a live broker is configured but the daily token expired, the
+                # agent would silently fall back to paper. Ping to re-link and skip.
+                from broker_manager import get_broker
+                broker = get_broker(uid)
+                if broker.broker_name != 'paper' and broker.needs_relink():
+                    logger.info(f"Auto-session skipped for {str(uid)[:8]} — broker re-link needed")
+                    try:
+                        from telegram_notify import notify_relink
+                        notify_relink(uid)
+                    except Exception:
+                        pass
+                    continue
+
                 from trading_manager import get_trading_balance
                 bal = get_trading_balance(uid) or {}
                 avail = float(bal.get('balance') or 0)
@@ -173,6 +232,30 @@ def run_auto_session_all_users(self):
     except Exception as exc:
         logger.error(f"run_auto_session_all_users failed: {exc}", exc_info=True)
         raise self.retry(exc=exc, countdown=120)
+
+
+@celery_app.task(name='tasks.expire_proposals', bind=True, max_retries=1)
+def expire_proposals(self):
+    """Lapse PENDING live-order proposals that weren't acted on in time."""
+    try:
+        from proposal_store import expire_stale_proposals
+        n = expire_stale_proposals()
+        if n:
+            logger.info(f"Expired {n} stale order proposal(s)")
+    except Exception as exc:
+        logger.error(f"expire_proposals failed: {exc}", exc_info=True)
+
+
+@celery_app.task(name='tasks.reconcile_live_orders', bind=True, max_retries=1)
+def reconcile_live_orders(self):
+    """Finalize approved live orders whose broker fill was still pending."""
+    try:
+        from proposal_store import reconcile_open_orders
+        n = reconcile_open_orders()
+        if n:
+            logger.info(f"Reconciled {n} live order(s)")
+    except Exception as exc:
+        logger.error(f"reconcile_live_orders failed: {exc}", exc_info=True)
 
 
 @celery_app.task(name='tasks.monitor_stop_losses', bind=True, max_retries=2)

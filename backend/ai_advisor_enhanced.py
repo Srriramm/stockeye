@@ -4,7 +4,6 @@ Fetches live prices, historical data, technicals, and news before giving advice
 """
 
 import os
-import json
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
@@ -15,29 +14,10 @@ from stock_data import (
 )
 from news_monitor import fetch_stock_news, get_news_summary
 
+import llm_client
+
 logger = logging.getLogger(__name__)
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
-
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
-
-# Initialize clients
-openai_client = None
-anthropic_client = None
-
-try:
-    from openai import OpenAI
-    if OPENAI_API_KEY:
-        openai_client = OpenAI(api_key=OPENAI_API_KEY)
-except ImportError:
-    pass
-
-try:
-    from anthropic import Anthropic
-    if ANTHROPIC_API_KEY:
-        anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
-except ImportError:
-    pass
 
 
 SYSTEM_PROMPT = """You are an expert Indian stock market advisor. You ONLY recommend stocks based on REAL market data provided to you.
@@ -247,23 +227,25 @@ def get_budget_based_recommendation(budget, user_message, provider='auto'):
         # Step 3: Create enhanced user message
         enhanced_message = f"{user_message}\n\nIMPORTANT: Only recommend stocks from the data provided below. Do not make up prices or stocks.\n\n{context}"
 
-        # Step 4: Get AI recommendation
-        if provider == 'anthropic' or (provider == 'auto' and anthropic_client):
-            response = _get_anthropic_response(enhanced_message)
-            provider_used = 'anthropic'
-        elif provider == 'openai' or (provider == 'auto' and openai_client):
-            response = _get_openai_response(enhanced_message)
-            provider_used = 'openai'
-        else:
+        # Step 4: Get AI recommendation (model-agnostic; 'auto' → default provider)
+        llm_provider = None if provider in ('auto', None) else provider
+        result = llm_client.generate(
+            system=SYSTEM_PROMPT, prompt=enhanced_message, provider=llm_provider,
+            deep=True, temperature=0.7, max_tokens=2000,
+        )
+        if result.get('error') or not result.get('text'):
             return {
-                'response': "❌ No AI provider available. Please configure OPENAI_API_KEY or ANTHROPIC_API_KEY in your .env file.",
-                'provider_used': 'none',
-                'error': 'No API keys configured'
+                'response': ("❌ No AI provider available. Configure GEMINI_API_KEY "
+                             "(or ANTHROPIC_API_KEY / OPENAI_API_KEY) in your .env file."
+                             if not llm_client.is_available()
+                             else f"❌ Error generating recommendation: {result.get('error')}"),
+                'provider_used': result.get('provider', 'none'),
+                'error': result.get('error') or 'No API keys configured',
             }
 
         return {
-            'response': response,
-            'provider_used': provider_used,
+            'response': result['text'],
+            'provider_used': result['provider'],
             'stocks_found': len(stocks_in_budget),
             'budget': budget,
             'data_used': f"{len(stocks_in_budget)} real stocks analyzed"
@@ -276,42 +258,6 @@ def get_budget_based_recommendation(budget, user_message, provider='auto'):
             'provider_used': 'none',
             'error': str(e)
         }
-
-
-def _get_openai_response(message):
-    """Get response from OpenAI GPT-4."""
-    if not openai_client:
-        raise ValueError("OpenAI client not initialized")
-
-    response = openai_client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": message}
-        ],
-        temperature=0.7,
-        max_tokens=1500
-    )
-
-    return response.choices[0].message.content
-
-
-def _get_anthropic_response(message):
-    """Get response from Anthropic Claude."""
-    if not anthropic_client:
-        raise ValueError("Anthropic client not initialized")
-
-    response = anthropic_client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=2000,
-        temperature=0.7,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": message}
-        ]
-    )
-
-    return response.content[0].text
 
 
 # Helper function to extract budget from user message

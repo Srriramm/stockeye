@@ -585,6 +585,43 @@ def get_bulk_prices(tickers):
     return prices
 
 
+def get_liquidity_and_earnings(ticker: str) -> dict:
+    """
+    Return avg daily traded value (₹ crores) and days-to-next-earnings for ticker.
+    Used by the agentic trader's RiskGate to skip illiquid stocks and pre-earnings plays.
+    Returns dict with keys: avg_daily_volume_cr (float|None), days_to_earnings (int|None).
+    """
+    fmt = format_ticker(ticker)
+    try:
+        info = yf.Ticker(fmt).info
+    except Exception:
+        return {"avg_daily_volume_cr": None, "days_to_earnings": None}
+
+    # Average daily traded value in crores
+    avg_vol   = info.get("averageVolume") or info.get("averageDailyVolume10Day")
+    cur_price = info.get("currentPrice") or info.get("regularMarketPrice")
+    avg_daily_volume_cr = None
+    if avg_vol and cur_price:
+        avg_daily_volume_cr = round((avg_vol * cur_price) / 1e7, 2)  # 1 cr = 1e7
+
+    # Days to next earnings
+    days_to_earnings = None
+    earnings_ts = info.get("earningsTimestamp") or info.get("earningsDate")
+    if earnings_ts:
+        try:
+            # yfinance returns either a unix timestamp (int) or a list
+            if isinstance(earnings_ts, (list, tuple)):
+                earnings_ts = earnings_ts[0]
+            earnings_dt = datetime.fromtimestamp(int(earnings_ts))
+            delta = (earnings_dt.date() - datetime.now().date()).days
+            if delta >= 0:
+                days_to_earnings = delta
+        except Exception:
+            pass
+
+    return {"avg_daily_volume_cr": avg_daily_volume_cr, "days_to_earnings": days_to_earnings}
+
+
 # ─── Helper Functions ───────────────────────────────────────────
 
 def _format_indian_number(num):

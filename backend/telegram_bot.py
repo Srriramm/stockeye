@@ -20,7 +20,7 @@ import requests as _req
 
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes,
 )
 
@@ -352,6 +352,87 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /proposals — list pending live-order proposals
+# ─────────────────────────────────────────────────────────────────────────────
+async def cmd_proposals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _auth(update):
+        return
+    try:
+        from proposal_store import list_proposals, expire_stale_proposals
+        expire_stale_proposals()
+        pending = list_proposals(USER_ID, status="PENDING")
+        if not pending:
+            await update.message.reply_text("✅ No pending proposals.")
+            return
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        for p in pending:
+            side_emoji = "🟢 BUY" if p["side"] == "BUY" else "🔴 SELL"
+            msg = (
+                f"🤝 <b>Proposal #{p['id']}</b>\n"
+                f"{side_emoji}  <b>{p['ticker']}</b>  {p['quantity']}×  @ ₹{float(p['price'] or 0):,.2f}\n"
+                f"💬 {(p.get('reasoning') or '')[:500]}"
+            )
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve:{p['id']}"),
+                InlineKeyboardButton("❌ Reject",  callback_data=f"reject:{p['id']}"),
+            ]])
+            await update.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
+    except Exception as exc:
+        await update.message.reply_text(f"❌ {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inline button callbacks → approve / reject proposals
+# ─────────────────────────────────────────────────────────────────────────────
+async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    # Auth: only the configured chat may act on buttons
+    if str(query.message.chat.id) != CHAT_ID:
+        await query.answer("Unauthorised", show_alert=True)
+        return
+    await query.answer()
+    data = query.data or ""
+    try:
+        action, pid_str = data.split(":", 1)
+        pid = int(pid_str)
+    except ValueError:
+        await query.edit_message_text("⚠️ Malformed action.")
+        return
+
+    # The live order placement + reconciliation can block; run it off the event loop.
+    import asyncio
+
+    def _act():
+        from proposal_store import approve_proposal, reject_proposal
+        if action == "approve":
+            return approve_proposal(pid, USER_ID)
+        if action == "reject":
+            return reject_proposal(pid, USER_ID)
+        return {"error": "Unknown action"}
+
+    result = await asyncio.to_thread(_act)
+
+    if result.get("error"):
+        await query.edit_message_text(f"❌ Proposal #{pid}: {result['error']}")
+    elif action == "reject":
+        await query.edit_message_text(f"❌ Proposal #{pid} rejected — no order placed.")
+    else:
+        status = result.get("status")
+        if status == "FILLED":
+            await query.edit_message_text(
+                f"✅ Proposal #{pid} <b>FILLED</b> — {result.get('side')} "
+                f"{result.get('fill_quantity')}× {result.get('ticker')} "
+                f"@ ₹{float(result.get('fill_price') or 0):,.2f}",
+                parse_mode="HTML",
+            )
+        else:
+            await query.edit_message_text(
+                f"⏳ Proposal #{pid} approved — order placed (status: {status}). "
+                f"Reconciling fill…"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
@@ -370,6 +451,8 @@ def main():
     app.add_handler(CommandHandler("history",   cmd_history))
     app.add_handler(CommandHandler("status",    cmd_status))
     app.add_handler(CommandHandler("chat",      cmd_chat))
+    app.add_handler(CommandHandler("proposals", cmd_proposals))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info(f"Stockeye Telegram bot started (chat_id={CHAT_ID})")

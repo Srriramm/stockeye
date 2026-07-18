@@ -67,7 +67,11 @@ export function AuthProvider({ children }) {
                 }
             } catch (err) {
                 console.error('Failed to fetch user meta:', err);
-                if (!isBackground) {
+                // Only set rejected if the backend explicitly returned a 200
+                // with status=rejected. Network errors / 5xx / auth failures
+                // should NOT kick the user to the "Not Invited" screen —
+                // leave whatever status was previously stored in sessionStorage.
+                if (!isBackground && err?.response?.status === 200) {
                     setUserRole('user');
                     setUserStatus('rejected');
                 }

@@ -314,40 +314,15 @@ def _generate_narrative(ticker, price, forecast, tech, news, backtest, score) ->
     sys_msg = ("You are a quantitative analyst. Write factual, concise stock notes "
                "using provided data only. No hype. No speculation.")
 
+    import llm_client
     try:
-        from ai_advisor import anthropic_client, openai_client
-    except Exception:
-        anthropic_client, openai_client = None, None
-
-    # Try Anthropic first
-    if anthropic_client:
-        try:
-            resp = anthropic_client.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=220,
-                temperature=0.3,
-                system=sys_msg,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return resp.content[0].text.strip()
-        except Exception as e:
-            logger.warning(f"Anthropic narrative failed for {ticker}: {e} — trying OpenAI...")
-
-    # Fall through to OpenAI
-    if openai_client:
-        try:
-            resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=220,
-                temperature=0.3,
-                messages=[
-                    {"role": "system", "content": sys_msg},
-                    {"role": "user",   "content": prompt},
-                ],
-            )
-            return resp.choices[0].message.content.strip()
-        except Exception as e:
-            logger.warning(f"OpenAI narrative failed for {ticker}: {e}")
+        text = (llm_client.generate_text(
+            system=sys_msg, prompt=prompt, temperature=0.3, max_tokens=220,
+        ) or "").strip()
+        if text:
+            return text
+    except Exception as e:
+        logger.warning(f"AI narrative failed for {ticker}: {e}")
 
     # Rule-based fallback
     direction = "rise" if trend_pct > 0 else "fall"

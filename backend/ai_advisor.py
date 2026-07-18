@@ -4,47 +4,15 @@ Provides personalized, data-driven stock recommendations for Indian markets.
 """
 
 import os
-import json
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
-# eventlet.Timeout is the only reliable way to interrupt blocking I/O in the
-# eventlet green-thread world. httpx's own timeout doesn't always fire because
-# eventlet patches low-level sockets but not httpx's internal async machinery.
-try:
-    import eventlet
-    _EVENTLET_AVAILABLE = True
-except ImportError:
-    _EVENTLET_AVAILABLE = False
-
-AI_TIMEOUT = 50  # seconds — hard wall for any single AI API call
+import llm_client
 
 logger = logging.getLogger(__name__)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
-
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
-
-# Initialize OpenAI client
-openai_client = None
-try:
-    from openai import OpenAI
-    if OPENAI_API_KEY:
-        openai_client = OpenAI(api_key=OPENAI_API_KEY)
-except ImportError:
-    print("OpenAI package not installed")
-
-# Initialize Anthropic client
-anthropic_client = None
-try:
-    from anthropic import Anthropic
-    if ANTHROPIC_API_KEY:
-        anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
-        print("Anthropic client initialized successfully")
-except ImportError:
-    print("Anthropic package not installed. Run: pip install anthropic")
 
 # ─── System Prompt ──────────────────────────────────────────────
 
@@ -196,83 +164,40 @@ def _prepare_market_context(stock_data=None, news_data=None, portfolio_data=None
 
 # ─── Main AI Chat Function ─────────────────────────────────────
 
-def get_stock_advice(user_query, market_context=None, stock_data=None, news_data=None,
-                     portfolio_data=None, technicals=None, conversation_history=None):
-    """
-    Get AI-powered stock advice based on user query and market data.
-
-    Returns:
-        dict with 'response' (AI message), 'data_used' (context info), and 'error' if any
-    """
-    if conversation_history is None:
-        conversation_history = []
-
-    if not openai_client:
-        return {
-            'response': 'AI service unavailable — OPENAI_API_KEY is not configured.',
-            'data_used': '',
-            'error': 'OpenAI API key not configured.'
-        }
-
-    # Prepare context
-    context = _prepare_market_context(stock_data, news_data, portfolio_data, technicals)
-
-    # Build user message with context
-    user_message = user_query
-    if context:
-        user_message = f"""User Question: {user_query}
+def _build_user_message(user_query, context_str):
+    """Wrap the user query with the real-time market-data block when present."""
+    if not context_str:
+        return user_query
+    return f"""User Question: {user_query}
 
 --- REAL-TIME MARKET DATA (use this to inform your advice) ---
-{context}
+{context_str}
 --- END DATA ---
 
 Please provide your analysis and advice based on the above real-time data."""
 
-    # Build messages for API
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Add per-user conversation history for context
-    for msg in conversation_history[-MAX_HISTORY:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+def get_stock_advice(user_query, market_context=None, stock_data=None, news_data=None,
+                     portfolio_data=None, technicals=None, conversation_history=None):
+    """
+    Get AI-powered stock advice based on user query and market data.
+    Thin compatibility wrapper over the model-agnostic path.
 
-    messages.append({"role": "user", "content": user_message})
-
-    try:
-        def _call():
-            return openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                max_tokens=2000,
-                temperature=0.7,
-                presence_penalty=0.1,
-                frequency_penalty=0.1,
-                timeout=45,
-            )
-
-        if _EVENTLET_AVAILABLE:
-            with eventlet.Timeout(AI_TIMEOUT):
-                response = _call()
-        else:
-            response = _call()
-
-        ai_response = response.choices[0].message.content
-
-        return {
-            'response': ai_response,
-            'data_used': context[:200] + '...' if context else 'No market data context',
-            'tokens_used': response.usage.total_tokens if response.usage else 0,
-            'error': None
-        }
-
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"OpenAI API error: {error_msg}", exc_info=True)
-
-        return {
-            'response': f'AI service error: {error_msg}',
-            'data_used': context[:200] if context else '',
-            'error': error_msg
-        }
+    Returns:
+        dict with 'response' (AI message), 'data_used' (context info), and 'error' if any
+    """
+    context = _prepare_market_context(stock_data, news_data, portfolio_data, technicals)
+    result = get_stock_advice_dual(
+        user_query, provider='auto', conversation_history=conversation_history,
+        stock_data=stock_data, news_data=news_data,
+        portfolio_data=portfolio_data, technicals=technicals,
+    )
+    return {
+        'response': result.get('response', ''),
+        'data_used': (context[:200] + '...') if context else 'No market data context',
+        'tokens_used': result.get('tokens_used', 0),
+        'error': result.get('error'),
+    }
 
 
 def get_ai_response(user_query, conversation_history=None, user_id=None, **context):
@@ -285,11 +210,12 @@ def get_ai_response(user_query, conversation_history=None, user_id=None, **conte
 
 def get_stock_advice_dual(user_query, provider='auto', conversation_history=None, user_id=None, **context):
     """
-    Get AI-powered stock advice with dual provider support (OpenAI + Anthropic).
+    Get AI-powered stock advice via the model-agnostic LLM layer.
 
     Args:
         user_query: User's question
-        provider: 'auto', 'openai', or 'anthropic'
+        provider: 'auto' (default provider — Gemini unless reconfigured), or an
+                  explicit 'gemini' | 'anthropic' | 'openai'
         user_id: Supabase user_id — used to load shared platform intelligence
         conversation_history: List of prior {role, content} messages for this user's session.
                               Never pass a global list — always load per-user history from DB.
@@ -298,7 +224,7 @@ def get_stock_advice_dual(user_query, provider='auto', conversation_history=None
     Returns:
         {
             'response': str,
-            'provider_used': 'openai' | 'anthropic' | 'none',
+            'provider_used': str,
             'model_used': str,
             'query_type': 'quick' | 'deep',
             'error': str | None
@@ -307,19 +233,11 @@ def get_stock_advice_dual(user_query, provider='auto', conversation_history=None
     if conversation_history is None:
         conversation_history = []
 
-    # Determine provider
     query_type = classify_query(user_query)
+    deep = query_type == 'deep'
 
-    if provider == 'auto':
-        # Smart routing: Claude for deep analysis, GPT-4 for quick queries
-        if query_type == 'deep' and anthropic_client:
-            provider = 'anthropic'
-        elif openai_client:
-            provider = 'openai'
-        elif anthropic_client:
-            provider = 'anthropic'
-        else:
-            provider = None
+    # 'auto' means "let llm_client pick the default provider"
+    llm_provider = None if provider in ('auto', None) else provider
 
     # Load shared platform intelligence for this user
     intel_block = ""
@@ -330,180 +248,41 @@ def get_stock_advice_dual(user_query, provider='auto', conversation_history=None
         except Exception:
             pass
 
-    # Route to appropriate provider
-    if provider == 'anthropic' and anthropic_client:
-        return _query_anthropic(user_query, query_type,
-                                conversation_history=conversation_history,
-                                intel_block=intel_block, **context)
-    elif provider == 'openai' and openai_client:
-        return _query_openai(user_query, query_type,
-                             conversation_history=conversation_history,
-                             intel_block=intel_block, **context)
-    else:
-        return {
-            'response': 'AI service unavailable — please configure OPENAI_API_KEY or ANTHROPIC_API_KEY.',
-            'provider_used': 'none',
-            'model_used': 'none',
-            'query_type': query_type,
-            'error': 'No AI provider configured.'
-        }
-
-
-def _query_openai(user_query, query_type, conversation_history=None, intel_block="", **context):
-    """Query OpenAI GPT-4 using per-user conversation history loaded from DB."""
-    if conversation_history is None:
-        conversation_history = []
-
-    # Prepare context
-    context_str = _prepare_market_context(
-        context.get('stock_data'),
-        context.get('news_data'),
-        context.get('portfolio_data'),
-        context.get('technicals')
-    )
-
-    # Build system prompt — inject shared platform intelligence if available
-    system = SYSTEM_PROMPT
-    if intel_block:
-        system = SYSTEM_PROMPT + "\n\n" + intel_block
-
-    # Build user message
-    user_message = user_query
-    if context_str:
-        user_message = f"""User Question: {user_query}
-
---- REAL-TIME MARKET DATA (use this to inform your advice) ---
-{context_str}
---- END DATA ---
-
-Please provide your analysis and advice based on the above real-time data."""
-
-    # Build messages for API using per-user history (no global state)
-    messages = [{"role": "system", "content": system}]
-
-    for msg in conversation_history[-MAX_HISTORY:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-
-    messages.append({"role": "user", "content": user_message})
-
-    try:
-        def _call():
-            return openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                max_tokens=2000,
-                temperature=0.7,
-                presence_penalty=0.1,
-                frequency_penalty=0.1,
-                timeout=45,
-            )
-
-        if _EVENTLET_AVAILABLE:
-            with eventlet.Timeout(AI_TIMEOUT):
-                response = _call()
-        else:
-            response = _call()
-
-        ai_response = response.choices[0].message.content
-
-        return {
-            'response': ai_response,
-            'provider_used': 'openai',
-            'model_used': 'gpt-4o',
-            'query_type': query_type,
-            'tokens_used': response.usage.total_tokens if response.usage else 0,
-            'error': None
-        }
-
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"OpenAI API error: {error_msg}", exc_info=True)
-        return {
-            'response': f'AI service error: {error_msg}',
-            'provider_used': 'openai',
-            'model_used': 'gpt-4o',
-            'query_type': query_type,
-            'error': error_msg
-        }
-
-
-def _query_anthropic(user_query, query_type, conversation_history=None, intel_block="", **context):
-    """Query Anthropic Claude using per-user conversation history loaded from DB."""
-    if conversation_history is None:
-        conversation_history = []
-
-    # Model selection based on query complexity
-    model = "claude-sonnet-4-6" if query_type == 'deep' else "claude-haiku-4-5-20251001"
-    max_tokens = 4000 if query_type == 'deep' else 2000
-
-    # Prepare context
-    context_str = _prepare_market_context(
-        context.get('stock_data'),
-        context.get('news_data'),
-        context.get('portfolio_data'),
-        context.get('technicals')
-    )
-
-    # Inject shared platform intelligence into system prompt
+    # Build system prompt + context
     system = SYSTEM_PROMPT + ("\n\n" + intel_block if intel_block else "")
+    context_str = _prepare_market_context(
+        context.get('stock_data'), context.get('news_data'),
+        context.get('portfolio_data'), context.get('technicals'),
+    )
 
-    # Build messages using per-user history (no global state)
+    # Build neutral message history (per-user, no global state)
     messages = []
-
     for msg in conversation_history[-MAX_HISTORY:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": _build_user_message(user_query, context_str)})
 
-    # Build user message with context
-    user_message = user_query
-    if context_str:
-        user_message = f"""User Question: {user_query}
+    result = llm_client.generate(
+        system=system, messages=messages, provider=llm_provider,
+        deep=deep, temperature=0.7, max_tokens=4000 if deep else 2000,
+    )
 
---- REAL-TIME MARKET DATA (use this to inform your advice) ---
-{context_str}
---- END DATA ---
-
-Please provide your analysis and advice based on the above real-time data."""
-
-    messages.append({"role": "user", "content": user_message})
-
-    try:
-        def _call():
-            return anthropic_client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=0.7,
-                system=system,
-                messages=messages,
-                timeout=45,
-            )
-
-        if _EVENTLET_AVAILABLE:
-            with eventlet.Timeout(AI_TIMEOUT):
-                response = _call()
-        else:
-            response = _call()
-
-        ai_response = response.content[0].text
-
+    if result.get('error'):
+        logger.error(f"LLM error ({result.get('provider')}): {result['error']}")
         return {
-            'response': ai_response,
-            'provider_used': 'anthropic',
-            'model_used': model,
+            'response': f"AI service error: {result['error']}",
+            'provider_used': result.get('provider', 'none'),
+            'model_used': result.get('model', 'none'),
             'query_type': query_type,
-            'tokens_used': response.usage.input_tokens + response.usage.output_tokens if hasattr(response, 'usage') else 0,
-            'error': None
+            'error': result['error'],
         }
 
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Anthropic API error: {error_msg}", exc_info=True)
-        return {
-            'response': f'AI service error: {error_msg}',
-            'provider_used': 'anthropic',
-            'model_used': model,
-            'query_type': query_type,
-            'error': error_msg
-        }
+    return {
+        'response': result['text'],
+        'provider_used': result['provider'],
+        'model_used': result['model'],
+        'query_type': query_type,
+        'error': None,
+    }
 
 
 def analyze_stock(ticker, stock_info=None, technicals=None, news=None):

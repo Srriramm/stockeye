@@ -10,6 +10,7 @@ Those users are auto-promoted to role='admin', status='approved' on first login.
 """
 
 import os
+import time
 import logging
 from db import get_db_connection
 
@@ -22,20 +23,30 @@ ADMIN_USER_IDS = {x.strip() for x in os.getenv('ADMIN_USER_IDS', '').split(',') 
 # ─── Redis cache for user status ───────────────────────────────
 # Caches "status,role" string per user_id to speed up before_request checks.
 _redis_client = None
+_redis_unavailable_until = 0.0
+_REDIS_RETRY_INTERVAL = 60
 
 def _get_redis():
-    global _redis_client
-    if _redis_client is None:
-        redis_url = os.getenv('REDIS_URL')
-        if redis_url:
-            try:
-                import redis as _r
-                _redis_client = _r.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
-                _redis_client.ping()
-            except Exception as e:
-                logger.warning(f"Redis unavailable for user cache: {e}")
-                _redis_client = None
-    return _redis_client
+    global _redis_client, _redis_unavailable_until
+    if _redis_client is not None:
+        return _redis_client
+    now = time.monotonic()
+    if now < _redis_unavailable_until:
+        return None
+    redis_url = os.getenv('REDIS_URL')
+    if not redis_url:
+        return None
+    try:
+        import redis as _r
+        client = _r.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
+        client.ping()
+        _redis_client = client
+        _redis_unavailable_until = 0.0
+        return _redis_client
+    except Exception as e:
+        logger.warning(f"Redis unavailable for user cache: {e}")
+        _redis_unavailable_until = now + _REDIS_RETRY_INTERVAL
+        return None
 
 
 def _cache_user_status(user_id: str, status: str, role: str):

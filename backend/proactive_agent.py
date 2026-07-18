@@ -272,6 +272,33 @@ def _execute_tool(tool_name: str, tool_input: dict, user_id: str) -> dict:
                 return {"score": 50, "signal": "HOLD", "note": "Brain engine unavailable"}
 
         elif tool_name == "get_portfolio_holdings":
+            # Prefer the user's REAL broker holdings when a live broker is linked,
+            # so recommendations reference actual positions (e.g. "trim your INFY").
+            try:
+                from broker_manager import get_portfolio_state
+                pstate = get_portfolio_state(user_id)
+                if pstate["mode"] == "live":
+                    slim = [
+                        {
+                            "ticker":        h.get("ticker"),
+                            "name":          h.get("name", ""),
+                            "quantity":      h.get("quantity"),
+                            "buy_price":     h.get("avg_buy_price"),
+                            "current_price": h.get("current_price"),
+                            "pnl_percent":   round((float(h.get("current_price") or 0) /
+                                                    float(h.get("avg_buy_price") or 1) - 1) * 100, 2),
+                        }
+                        for h in pstate["holdings"]
+                    ]
+                    return {
+                        "source":             "broker",
+                        "holdings":           slim,
+                        "total_value":        pstate["total_value"],
+                        "total_pnl_percent":  None,
+                    }
+            except Exception as exc:
+                logger.debug(f"[ProactiveAgent] live holdings unavailable, using manual portfolio: {exc}")
+
             from portfolio_manager import get_all_holdings, get_bulk_prices, calculate_portfolio_value
             holdings = get_all_holdings(user_id)
             if not holdings:
@@ -350,8 +377,9 @@ def analyze_stock_for_user(user_id: str, ticker: str,
         logger.info(f"[ProactiveAgent] Cache hit: {ticker} ({user_id}, {session})")
         return cached
 
-    client = _get_client()
-    if not client:
+    import llm_client
+    if not llm_client.is_available():
+        logger.error("[ProactiveAgent] No LLM provider configured")
         return None
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M IST")
@@ -375,104 +403,42 @@ def analyze_stock_for_user(user_id: str, ticker: str,
         f"Gather the necessary data using tools, then submit your recommendation."
     )
 
-    messages = [{"role": "user", "content": user_message}]
-    model = MODEL_TRIAGE       # Start cheap
-    recommendation = None
-    data_sources_used = []
+    # Escalate to the deep model tier when the brain score is extreme.
+    def _escalate(name, inp, result, deep):
+        if name == "get_brain_score":
+            score = (result or {}).get("score", 50)
+            if score >= ESCALATE_ABOVE or score <= ESCALATE_BELOW:
+                logger.info(f"[ProactiveAgent] Escalating to deep model (brain score={score} for {ticker})")
+                return True
+        return False
 
-    for iteration in range(MAX_TOOL_ITERATIONS):
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=1800,
-                temperature=0.3,
-                system=SYSTEM_PROMPT,
-                tools=AGENT_TOOLS,
-                messages=messages,
-                timeout=50,
-            )
-        except Exception as e:
-            logger.error(
-                f"[ProactiveAgent] Claude API error (iter {iteration}, {ticker}): {e}"
-            )
-            break
+    loop = llm_client.run_agent_loop(
+        system=SYSTEM_PROMPT,
+        user_prompt=user_message,
+        tools=AGENT_TOOLS,
+        dispatch=lambda name, inp: _execute_tool(name, inp, user_id),
+        terminal_tools={"submit_recommendation"},
+        max_iterations=MAX_TOOL_ITERATIONS,
+        temperature=0.3,
+        max_tokens=1800,
+        escalate=_escalate,
+    )
 
-        # Append assistant response to message history
-        messages.append({"role": "assistant", "content": response.content})
-
-        if response.stop_reason == "end_turn":
-            # Claude finished without calling submit_recommendation
-            logger.warning(
-                f"[ProactiveAgent] end_turn without submit for {ticker} (iter {iteration})"
-            )
-            break
-
-        if response.stop_reason == "tool_use":
-            tool_results = []
-
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-
-                tool_name = block.name
-                tool_input = block.input
-
-                if tool_name == "submit_recommendation":
-                    # Final answer received
-                    recommendation = dict(tool_input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps({"status": "accepted"}),
-                    })
-                    break  # Stop processing further blocks
-                else:
-                    # Execute data-gathering tool
-                    result = _execute_tool(tool_name, tool_input, user_id)
-                    data_sources_used.append(tool_name)
-
-                    # Escalate to Sonnet if brain score is extreme
-                    if tool_name == "get_brain_score" and model == MODEL_TRIAGE:
-                        score = result.get("score", 50)
-                        if score >= ESCALATE_ABOVE or score <= ESCALATE_BELOW:
-                            logger.info(
-                                f"[ProactiveAgent] Escalating to Sonnet "
-                                f"(brain score={score} for {ticker})"
-                            )
-                            model = MODEL_DEEP
-
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result),
-                    })
-
-            if recommendation:
-                break  # Done — exit the loop
-
-            # Feed tool results back to Claude for next iteration
-            messages.append({"role": "user", "content": tool_results})
-
-        else:
-            logger.warning(
-                f"[ProactiveAgent] Unexpected stop_reason={response.stop_reason} "
-                f"for {ticker}"
-            )
-            break
-
+    recommendation = loop.get("terminal_result")
     if not recommendation:
         logger.warning(
             f"[ProactiveAgent] No recommendation produced for {ticker} ({user_id})"
         )
         return None
 
+    model = loop.get("model")
     # Enrich with metadata
     recommendation.update({
         "ticker": ticker,
         "user_id": user_id,
         "session": session,
         "model_used": model,
-        "data_sources": data_sources_used,
+        "data_sources": loop.get("tools_called", []),
         "generated_at": datetime.now().isoformat(),
     })
 
