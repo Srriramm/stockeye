@@ -1,10 +1,9 @@
-name: Deploy to EC2
+name: Deploy to GCP VM
 
 on:
   push:
     branches: [main]
-
-  # Allow manual trigger from GitHub Actions tab
+  # Allow manual trigger from the GitHub Actions tab
   workflow_dispatch:
 
 jobs:
@@ -13,25 +12,39 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy via SSH
+      - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          command_timeout: 30m
           script: |
             set -e
+            REPO="https://github.com/Srriramm/stockeye.git"
+            APP_DIR="$HOME/stockeye"
 
-            echo "── Pulling latest code ──"
-            cd ~/stockeye
+            echo "── Sync code ──"
+            if [ ! -d "$APP_DIR/.git" ]; then
+              git clone "$REPO" "$APP_DIR"
+            fi
+            cd "$APP_DIR"
             git fetch origin main
             git reset --hard origin/main
 
-            echo "── Rebuilding and restarting containers ──"
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+            echo "── Secrets check ──"
+            if [ ! -f backend/.env ]; then
+              echo "ERROR: backend/.env is missing on the VM."
+              echo "Secrets are never committed — copy it once with:"
+              echo "  gcloud compute scp backend/.env stockeye:~/stockeye/backend/.env --zone asia-south1-a"
+              exit 1
+            fi
 
-            echo "── Removing unused images ──"
+            echo "── Build & restart (HTTP overlay) ──"
+            docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d --build
+
+            echo "── Prune old images ──"
             docker image prune -f
 
-            echo "── Container status ──"
-            docker compose ps
+            echo "── Status ──"
+            docker compose -f docker-compose.yml -f docker-compose.gcp.yml ps

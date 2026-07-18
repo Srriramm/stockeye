@@ -1,0 +1,24 @@
+# GCP overlay — HTTP-only deployment on a VM's public IP (no domain/TLS yet).
+#
+# Usage (on the VM):
+#   docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d --build
+#
+# What this does differently from the base file:
+#   - Serves plain HTTP on port 80 (mounts nginx-http.conf over the baked-in
+#     HTTPS config, which would otherwise fail without Let's Encrypt certs)
+#   - Disables the MCP server (Claude Desktop only — not needed on a server)
+#   - Keeps Celery at concurrency 2 (fine on a 4GB e2-medium)
+#
+# When you add a domain + TLS later, drop this overlay and use
+# docker-compose.prod.yml instead.
+
+services:
+  frontend:
+    # Replace the baked-in HTTPS default.conf with the HTTP-only config.
+    volumes:
+      - ./frontend/nginx-http.conf:/etc/nginx/conf.d/default.conf:ro
+
+  # MCP server is for Claude Desktop (STDIO) — not needed in the cloud.
+  mcp-server:
+    deploy:
+      replicas: 0
