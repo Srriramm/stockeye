@@ -40,11 +40,18 @@ jobs:
               exit 1
             fi
 
-            echo "── Build & restart (HTTP overlay) ──"
-            docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d --build
+            echo "── TLS check ──"
+            if [ ! -f /etc/letsencrypt/live/stockeye.duckdns.org/fullchain.pem ]; then
+              echo "ERROR: Let's Encrypt cert missing — HTTPS config would fail to start."
+              echo "Issue it once with: sudo certbot certonly --standalone -d stockeye.duckdns.org"
+              exit 1
+            fi
+
+            echo "── Build & restart (HTTPS prod overlay) ──"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
             echo "── Prune old images ──"
             docker image prune -f
 
             echo "── Status ──"
-            docker compose -f docker-compose.yml -f docker-compose.gcp.yml ps
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
